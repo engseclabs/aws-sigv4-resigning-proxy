@@ -2,8 +2,6 @@
 
 A [mitmproxy](https://mitmproxy.org/) addon that strips and re-signs AWS SigV4 requests on the fly, using credentials vended by [elhaz](https://github.com/61418/elhaz).
 
-Companion to the EngSec Labs post: [Re-signing AWS at the proxy layer for AI agents](https://engseclabs.com/blog/aws-sigv4-resigning-proxy/).
-
 ## Prerequisites
 
 - [elhaz](https://github.com/61418/elhaz) installed and daemon running

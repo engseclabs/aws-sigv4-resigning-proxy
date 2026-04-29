@@ -22,11 +22,20 @@ else
     MITMDUMP="mitmdump"
 fi
 
+SOCK_PATH="${PROXY_SOCK_PATH:-/run/proxy/creds.sock}"
+SOCK_DIR="$(dirname "${SOCK_PATH}")"
+
+# Create the socket directory if needed (no-op inside Docker where it's a volume mount)
+if [[ ! -d "${SOCK_DIR}" ]]; then
+    mkdir -p "${SOCK_DIR}"
+fi
+
 echo "Starting mitmproxy with elhaz_resign addon..."
-echo "  Addon:  ${ADDON}"
-echo "  Port:   8080"
-echo "  Config: ${ELHAZ_CONFIG_NAME:-sandbox-elhaz}"
-echo "  CA:     ${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
+echo "  Addon:       ${ADDON}"
+echo "  Port:        8080"
+echo "  Config:      ${ELHAZ_CONFIG_NAME:-sandbox-elhaz}"
+echo "  CA:          ${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
+echo "  Creds sock:  ${SOCK_PATH}"
 echo
 echo "First run generates ${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
 echo "Press Ctrl-C to stop."

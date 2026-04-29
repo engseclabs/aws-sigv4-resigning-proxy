@@ -22,7 +22,8 @@ services:
     networks:
       - proxy-net
     healthcheck:
-      test: ["CMD", "curl", "-fs", "--proxy", "http://localhost:8080", "http://mitm.it/"]
+      test: ["CMD", "python", "-c",
+        "import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost',8080)); s.close()"]
       interval: 5s
       timeout: 5s
       retries: 10

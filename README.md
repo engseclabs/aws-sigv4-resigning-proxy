@@ -37,7 +37,7 @@ elhaz daemon add -n sandbox-elhaz   # or whatever role you want the agent to use
 ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up -d --build
 ```
 
-The proxy generates a mitmproxy CA cert on first run and persists it in the `mitm-ca` volume. The agent waits for the proxy healthcheck to pass before starting.
+The proxy generates a mitmproxy CA cert on first run and persists it in the `mitm-ca` volume. The agent waits for the proxy TCP healthcheck to pass before starting.
 
 ### Run the test
 
@@ -45,7 +45,13 @@ The proxy generates a mitmproxy CA cert on first run and persists it in the `mit
 docker compose exec agent bash /agent/test_resign.sh
 ```
 
-The test calls `aws sts get-caller-identity` through the proxy. The returned ARN should be the elhaz role, not whatever identity is in your shell environment.
+Expected output:
+```
+=== elhaz SigV4 re-signing — Phase 1 ===
+Mode: container
+...
+SUCCESS: The identity is an assumed-role (as expected from elhaz).
+```
 
 Or call the AWS CLI directly — the agent container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-set:
 
@@ -57,8 +63,8 @@ docker compose exec agent aws s3 ls
 ### Tear down
 
 ```bash
-docker compose down          # stops containers, keeps volumes (CA cert, etc.)
-docker compose down -v       # stops containers and removes volumes
+docker compose down     # stops containers, keeps volumes (CA cert, etc.)
+docker compose down -v  # stops containers and removes volumes
 ```
 
 ## How the containers are wired
@@ -69,7 +75,7 @@ host
 │
 ├── proxy container
 │   ├── mitmdump :8080          — intercepts and re-signs AWS requests
-│   ├── elhaz export            — fetches IAC credentials via mounted socket
+│   ├── elhaz (in /opt/elhaz-venv) — fetches IAC credentials via mounted socket
 │   ├── /run/proxy/creds.sock   — vends per-client proxy keypairs (named volume)
 │   └── /run/mitmproxy/         — CA cert (named volume)
 │
@@ -82,6 +88,8 @@ host
 
 The agent is on an internal Docker bridge network. Its only internet egress is through the proxy container.
 
+> **Note on dependencies:** mitmproxy 12.x and elhaz 0.5.x have an irreconcilable `typing-extensions` version conflict. The proxy image resolves this by installing elhaz in a separate venv (`/opt/elhaz-venv`) and symlinking its binary onto `PATH`. They never share a Python environment.
+
 ## Configuration
 
 | Env var | Default | Description |
@@ -89,6 +97,7 @@ The agent is on an internal Docker bridge network. Its only internet egress is t
 | `ELHAZ_CONFIG_NAME` | `sandbox-elhaz` | elhaz config name for the IAC role |
 | `ELHAZ_SOCK` | `~/.elhaz/sock/daemon.sock` | Host path to the elhaz daemon socket |
 | `ELHAZ_CONFIG_DIR` | `~/.elhaz/configs` | Host path to elhaz config files |
+| `ELHAZ_SOCKET_PATH` | `/tmp/elhaz.sock` | Socket path inside the proxy container |
 | `PROXY_SOCK_PATH` | `/run/proxy/creds.sock` | Unix socket path for credential vending |
 | `PROXY_KEYPAIR_TTL` | `3600` | Proxy keypair lifetime in seconds |
 
@@ -102,9 +111,11 @@ ELHAZ_CONFIG_NAME=my-agent-role docker compose up -d
 
 ```bash
 bash setup_venv.sh
-ELHAZ_CONFIG_NAME=sandbox-elhaz bash start_proxy.sh   # separate terminal
-bash test_resign.sh
+PROXY_SOCK_PATH=/tmp/proxy/creds.sock ELHAZ_CONFIG_NAME=sandbox-elhaz bash start_proxy.sh  # separate terminal
+PROXY_SOCK_PATH=/tmp/proxy/creds.sock bash test_resign.sh
 ```
+
+> `PROXY_SOCK_PATH` must be overridden locally because `/run/proxy/` requires root on macOS.
 
 ## Files
 
@@ -112,7 +123,7 @@ bash test_resign.sh
 |---|---|
 | `elhaz_resign.py` | mitmproxy addon — issues per-client keypairs, validates inbound SigV4, re-signs with elhaz credentials |
 | `proxy-creds` | `credential_process` helper — connects to `creds.sock` and prints the keypair JSON the AWS SDK expects |
-| `docker/proxy/Dockerfile` | Proxy image — mitmproxy + botocore + elhaz |
+| `docker/proxy/Dockerfile` | Proxy image — mitmproxy + botocore + pydantic; elhaz in isolated venv |
 | `docker/agent/Dockerfile` | Agent image — AWS CLI + proxy-creds wired up via `credential_process` |
 | `docker-compose.yml` | Wires proxy and agent together with correct volume mounts and network isolation |
 | `setup_venv.sh` | Creates a local `venv/` for running without Docker |

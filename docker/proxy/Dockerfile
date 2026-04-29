@@ -1,14 +1,20 @@
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir mitmproxy botocore pydantic elhaz==0.5.1
+# mitmproxy 12.2.2 requires typing-extensions<=4.14; elhaz 0.5.1 requires
+# pydantic>=2.12.5 which requires typing-extensions>=4.14.1 — irreconcilable.
+# Install them in separate venvs: elhaz is only called as a subprocess so it
+# doesn't need to share the mitmproxy Python environment.
+RUN pip install --no-cache-dir mitmproxy==12.2.2 botocore pydantic && \
+    python -m venv /opt/elhaz-venv && \
+    /opt/elhaz-venv/bin/pip install --no-cache-dir elhaz==0.5.1 && \
+    ln -s /opt/elhaz-venv/bin/elhaz /usr/local/bin/elhaz
 
 WORKDIR /proxy
 
 COPY elhaz_resign.py .
 
-# Generate the mitmproxy CA on first run; persist it via a named volume.
-# The socket directory is created by start_proxy.sh or by the entrypoint below.
 ENV PROXY_SOCK_PATH=/run/proxy/creds.sock
+ENV ELHAZ_SOCKET_PATH=/tmp/elhaz.sock
 
 EXPOSE 8080
 

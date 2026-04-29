@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir mitmproxy==12.2.2 botocore pydantic && \
 WORKDIR /proxy
 
 COPY elhaz_resign.py .
+COPY proxy/ proxy/
 
 ENV PROXY_SOCK_PATH=/run/proxy/creds.sock
 ENV ELHAZ_SOCKET_PATH=/tmp/elhaz.sock

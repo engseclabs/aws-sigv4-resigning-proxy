@@ -15,6 +15,9 @@ Usage:
 
 Config (env vars):
     ELHAZ_CONFIG_NAME   elhaz config name (default: sandbox-elhaz)
+    ELHAZ_SOCKET_PATH   elhaz daemon socket path (default: elhaz's own default,
+                        typically ~/.elhaz/sock/daemon.sock); set to
+                        /tmp/elhaz.sock when running inside Docker
     PROXY_SOCK_PATH     Unix socket path for credential vending
                         (default: /run/proxy/creds.sock)
     PROXY_KEYPAIR_TTL   Keypair lifetime in seconds (default: 3600)
@@ -43,6 +46,7 @@ from mitmproxy import http
 log = logging.getLogger(__name__)
 
 ELHAZ_CONFIG = os.environ.get("ELHAZ_CONFIG_NAME", "sandbox-elhaz")
+ELHAZ_SOCKET_PATH = os.environ.get("ELHAZ_SOCKET_PATH")  # None → elhaz uses its default
 REFRESH_BEFORE_EXPIRY_SECONDS = 300
 
 PROXY_SOCK_PATH = os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock")
@@ -296,8 +300,12 @@ class ElhazCredentialCache:
 
     def _refresh(self) -> None:
         log.info("Fetching fresh credentials from elhaz (config=%s)", self.config_name)
+        cmd = ["elhaz"]
+        if ELHAZ_SOCKET_PATH:
+            cmd += ["--socket-path", ELHAZ_SOCKET_PATH]
+        cmd += ["export", "--format", "credential-process", "-n", self.config_name]
         result = subprocess.run(
-            ["elhaz", "export", "--format", "credential-process", "-n", self.config_name],
+            cmd,
             capture_output=True,
             text=True,
             check=True,

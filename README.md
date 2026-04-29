@@ -1,6 +1,6 @@
 # aws-sigv4-resigning-proxy
 
-A [mitmproxy](https://mitmproxy.org/) addon that sits between an untrusted agent and AWS. The agent holds a proxy-issued keypair that has no IAM identity. The proxy validates the inbound SigV4 signature locally, strips it, and re-signs outbound requests with real IAC credentials the agent never sees.
+A [mitmproxy](https://mitmproxy.org/) addon that sits between an untrusted agent and AWS. The agent holds a proxy-issued keypair with no IAM identity. The proxy validates the inbound SigV4 signature locally, strips it, and re-signs outbound requests with real IAC credentials the agent never sees.
 
 ## Why this exists: IAM Identity Center roles are unmodifiable
 
@@ -10,77 +10,101 @@ The proxy is the workaround: it holds an [elhaz](https://github.com/61418/elhaz)
 
 ## How it works
 
-**Credential carrier** — at startup, the proxy generates fake-but-syntactically-valid AWS keypairs and vends them to agent clients over a Unix socket (`creds.sock`). There is no IAM identity behind these keys. The agent's AWS SDK uses them to sign requests; the proxy validates the signature and re-signs with real credentials. If the keypair leaks, it is useless to AWS.
+**Credential carrier** — the proxy generates fake-but-syntactically-valid AWS keypairs and vends them to agent clients over a Unix socket (`creds.sock`). There is no IAM identity behind these keys. Each socket connection gets its own distinct keypair so the proxy can tell clients apart. The agent's AWS SDK uses the keypair to sign requests; if the keypair leaks it is useless to AWS.
 
-Each socket connection gets its own distinct keypair, so the proxy can tell clients apart by their `access_key_id`.
+**Local SigV4 validation** — the proxy recomputes the HMAC-SHA256 signature from the inbound request and looks up the signing secret by `access_key_id`. Requests signed with unknown or mismatched keys are rejected with a forged `InvalidClientTokenId` 403 before any IAC credential fetch occurs.
 
-**Local SigV4 validation** — the proxy recomputes the HMAC-SHA256 signature from the inbound request and compares it against the `Authorization` header. Requests signed with unknown or mismatched keys are rejected with a forged `InvalidClientTokenId` 403 before any IAC credential fetch occurs.
+**Docker isolation** — the agent container gets only `creds.sock` and the mitmproxy port. No elhaz socket, no IAC credentials, no host network access. The proxy is the agent's only path to AWS. Isolation is a property of the environment, not a property of the agent.
 
-**Docker isolation** — the agent container gets only `creds.sock` and the mitmproxy port. No elhaz socket, no IAM instance profile, no host network access. The proxy is the agent's only path to AWS. Isolation is a property of the environment, not a property of the agent.
-
-**Recording and enforcement modes** *(planned)*
-
-- **Recording mode**: forward all validated requests, log every AWS API call (service, action, resource ARN).
-- **Enforcement mode**: check each request against an allowlist derived from a prior recording. Block everything else with a forged `AccessDenied` 403 that AWS SDKs handle on their normal error path.
-
-This inverts the least-privilege problem: observe real behavior first, then derive the allowlist from it. See [DESIGN.md](DESIGN.md) for the full architecture.
-
-## Prerequisites
-
-- [elhaz](https://github.com/61418/elhaz) installed and daemon running
-- A named elhaz config for the role you want the agent to use
-- Python 3.12
+**Recording and enforcement modes** *(planned)* — see [DESIGN.md](DESIGN.md).
 
 ## Quickstart
 
+### Prerequisites
+
+- Docker and docker compose
+- [elhaz](https://github.com/61418/elhaz) installed, daemon running, and target role added
+
 ```bash
-# 1. Create the virtualenv
-bash setup_venv.sh
+elhaz daemon start
+elhaz daemon add -n sandbox-elhaz   # or whatever role you want the agent to use
+```
 
-# 2. Start the proxy (in a separate terminal)
-#    Creates /run/proxy/creds.sock and starts listening on port 8080
-ELHAZ_CONFIG_NAME=my-agent-role bash start_proxy.sh
+### Start the stack
 
-# 3. Run the test
-#    Fetches a proxy-issued keypair from creds.sock, signs a request with it,
-#    and verifies the proxy re-signs and forwards it correctly
-bash test_resign.sh
+```bash
+# Build images and start proxy + agent containers
+ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up -d --build
+```
+
+The proxy generates a mitmproxy CA cert on first run and persists it in the `mitm-ca` volume. The agent waits for the proxy healthcheck to pass before starting.
+
+### Run the test
+
+```bash
+docker compose exec agent bash /agent/test_resign.sh
 ```
 
 The test calls `aws sts get-caller-identity` through the proxy. The returned ARN should be the elhaz role, not whatever identity is in your shell environment.
 
-## Agent setup
-
-The agent container fetches its keypair via the `credential_process` mechanism — no custom SDK code required.
-
-Install `proxy-creds` in the container:
+Or call the AWS CLI directly — the agent container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-set:
 
 ```bash
-cp proxy-creds /usr/local/bin/proxy-creds
-chmod +x /usr/local/bin/proxy-creds
+docker compose exec agent aws sts get-caller-identity
+docker compose exec agent aws s3 ls
 ```
 
-Add to `~/.aws/config` in the container:
+### Tear down
 
-```ini
-[profile proxy]
-credential_process = /usr/local/bin/proxy-creds
+```bash
+docker compose down          # stops containers, keeps volumes (CA cert, etc.)
+docker compose down -v       # stops containers and removes volumes
 ```
 
-Mount only `creds.sock` into the container (not the elhaz socket or any IAC credentials):
+## How the containers are wired
 
 ```
-/run/proxy/creds.sock  →  mounted into agent container
-/run/proxy/mitm.sock   →  proxy side only
+host
+├── elhaz daemon  ←─── ~/.elhaz/sock/daemon.sock (bind-mounted into proxy)
+│
+├── proxy container
+│   ├── mitmdump :8080          — intercepts and re-signs AWS requests
+│   ├── elhaz export            — fetches IAC credentials via mounted socket
+│   ├── /run/proxy/creds.sock   — vends per-client proxy keypairs (named volume)
+│   └── /run/mitmproxy/         — CA cert (named volume)
+│
+└── agent container
+    ├── AWS SDK / CLI           — signs requests with proxy keypair
+    ├── proxy-creds             — credential_process helper reads creds.sock
+    ├── HTTPS_PROXY=proxy:8080  — routes all AWS traffic through proxy
+    └── (no elhaz socket, no IAC credentials)
 ```
+
+The agent is on an internal Docker bridge network. Its only internet egress is through the proxy container.
 
 ## Configuration
 
 | Env var | Default | Description |
 |---|---|---|
 | `ELHAZ_CONFIG_NAME` | `sandbox-elhaz` | elhaz config name for the IAC role |
+| `ELHAZ_SOCK` | `~/.elhaz/sock/daemon.sock` | Host path to the elhaz daemon socket |
+| `ELHAZ_CONFIG_DIR` | `~/.elhaz/configs` | Host path to elhaz config files |
 | `PROXY_SOCK_PATH` | `/run/proxy/creds.sock` | Unix socket path for credential vending |
-| `PROXY_KEYPAIR_TTL` | `3600` | Keypair lifetime in seconds |
+| `PROXY_KEYPAIR_TTL` | `3600` | Proxy keypair lifetime in seconds |
+
+Override defaults in `.env` or by prefixing `docker compose up`:
+
+```bash
+ELHAZ_CONFIG_NAME=my-agent-role docker compose up -d
+```
+
+## Local (non-Docker) usage
+
+```bash
+bash setup_venv.sh
+ELHAZ_CONFIG_NAME=sandbox-elhaz bash start_proxy.sh   # separate terminal
+bash test_resign.sh
+```
 
 ## Files
 
@@ -88,7 +112,10 @@ Mount only `creds.sock` into the container (not the elhaz socket or any IAC cred
 |---|---|
 | `elhaz_resign.py` | mitmproxy addon — issues per-client keypairs, validates inbound SigV4, re-signs with elhaz credentials |
 | `proxy-creds` | `credential_process` helper — connects to `creds.sock` and prints the keypair JSON the AWS SDK expects |
-| `setup_venv.sh` | Creates a `venv/` with mitmproxy and botocore |
-| `start_proxy.sh` | Starts `mitmdump` on port 8080 with the addon loaded |
-| `test_resign.sh` | Fetches a proxy keypair and calls `aws sts get-caller-identity` through the proxy |
+| `docker/proxy/Dockerfile` | Proxy image — mitmproxy + botocore + elhaz |
+| `docker/agent/Dockerfile` | Agent image — AWS CLI + proxy-creds wired up via `credential_process` |
+| `docker-compose.yml` | Wires proxy and agent together with correct volume mounts and network isolation |
+| `setup_venv.sh` | Creates a local `venv/` for running without Docker |
+| `start_proxy.sh` | Starts `mitmdump` locally on port 8080 |
+| `test_resign.sh` | Calls `aws sts get-caller-identity` through the proxy (works in both Docker and local mode) |
 | `DESIGN.md` | Full architecture and design rationale |

@@ -1,0 +1,60 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    volumes:
+      # elhaz daemon socket from the host — proxy calls elhaz export through this
+      - ${ELHAZ_SOCK:-~/.elhaz/sock/daemon.sock}:/tmp/elhaz.sock:ro
+      # elhaz configs from the host — tells the proxy which role to assume
+      - ${ELHAZ_CONFIG_DIR:-~/.elhaz/configs}:/root/.elhaz/configs:ro
+      # shared volume: proxy writes creds.sock here, agent reads it
+      - proxy-run:/run/proxy
+      # mitmproxy CA cert persisted across restarts so the agent trusts it
+      - mitm-ca:/run/mitmproxy
+    environment:
+      ELHAZ_CONFIG_NAME: ${ELHAZ_CONFIG_NAME:-sandbox-elhaz}
+      # tell elhaz inside the container to reach the host daemon via mounted socket
+      ELHAZ_SOCKET_PATH: /tmp/elhaz.sock
+      PROXY_SOCK_PATH: /run/proxy/creds.sock
+    ports:
+      - "8080:8080"
+    networks:
+      - proxy-net
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "--proxy", "http://localhost:8080", "http://mitm.it/"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/agent/Dockerfile
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+      # only creds.sock — no elhaz socket, no IAC credentials
+      - proxy-run:/run/proxy:ro
+      # CA cert so the agent trusts the proxy's TLS interception
+      - mitm-ca:/run/mitmproxy:ro
+    environment:
+      AWS_PROFILE: proxy
+      AWS_CA_BUNDLE: /run/mitmproxy/mitmproxy-ca-cert.pem
+      HTTPS_PROXY: http://proxy:8080
+      HTTP_PROXY: http://proxy:8080
+      PROXY_SOCK_PATH: /run/proxy/creds.sock
+    # agent is on the internal network only — proxy has the only internet egress
+    networks:
+      - proxy-net
+
+networks:
+  proxy-net:
+    # isolated bridge: containers can reach each other and the internet via
+    # proxy, but there is no direct route from agent to AWS endpoints
+    driver: bridge
+
+volumes:
+  proxy-run:
+  mitm-ca:

@@ -17,35 +17,36 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 
-SOCK_PATH = os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock")
+SOCK_PATH = Path(os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock"))
+_TIMEOUT = 10.0  # seconds
+
+
+def _die(message: str) -> None:
+    print(f"proxy-creds: {message}", file=sys.stderr)
+    sys.exit(1)
 
 
 def main() -> None:
-    if not os.path.exists(SOCK_PATH):
-        print(
-            f"proxy-creds: socket not found at {SOCK_PATH}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if not SOCK_PATH.exists():
+        _die(f"socket not found at {SOCK_PATH}")
 
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.connect(SOCK_PATH)
+            s.settimeout(_TIMEOUT)
+            s.connect(str(SOCK_PATH))
             data = b""
             while chunk := s.recv(4096):
                 data += chunk
     except OSError as exc:
-        print(f"proxy-creds: could not connect to {SOCK_PATH}: {exc}", file=sys.stderr)
-        sys.exit(1)
+        _die(f"could not connect to {SOCK_PATH}: {exc}")
 
     try:
         creds = json.loads(data)
     except json.JSONDecodeError as exc:
-        print(f"proxy-creds: invalid JSON from socket: {exc}", file=sys.stderr)
-        sys.exit(1)
+        _die(f"invalid JSON from socket: {exc}")
 
-    # AWS SDK expects exactly these fields.
     print(json.dumps(creds))
 
 

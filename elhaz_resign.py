@@ -23,7 +23,8 @@ Config (env vars):
     PROXY_KEYPAIR_TTL   Keypair lifetime in seconds (default: 3600)
 """
 
-import dataclasses
+__all__ = ["ElhazResignAddon", "CredentialStore", "parse_aws_host", "validate_sigv4"]
+
 import hashlib
 import hmac
 import json
@@ -35,13 +36,17 @@ import socket
 import string
 import subprocess
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Generator
 from urllib.parse import parse_qs, urlparse
 
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 from mitmproxy import http
+from pydantic import BaseModel, ConfigDict
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +54,7 @@ ELHAZ_CONFIG = os.environ.get("ELHAZ_CONFIG_NAME", "sandbox-elhaz")
 ELHAZ_SOCKET_PATH = os.environ.get("ELHAZ_SOCKET_PATH")  # None → elhaz uses its default
 REFRESH_BEFORE_EXPIRY_SECONDS = 300
 
-PROXY_SOCK_PATH = os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock")
+PROXY_SOCK_PATH = Path(os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock"))
 PROXY_KEYPAIR_TTL = int(os.environ.get("PROXY_KEYPAIR_TTL", "3600"))
 
 # SigV4 access key IDs must start with AKIA and be 20 uppercase alphanumeric chars.
@@ -58,15 +63,70 @@ _AK_ALPHABET = string.ascii_uppercase + string.digits
 
 
 # --------------------------------------------------------------------------- #
+# Exceptions
+# --------------------------------------------------------------------------- #
+
+class ProxyError(Exception):
+    def __init__(self, message: str, *, code: str = "InternalError") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class ValidationError(ProxyError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="InvalidClientTokenId")
+
+
+class UpstreamError(ProxyError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="ServiceUnavailable")
+
+
+_ERROR_STATUS: dict[type[ProxyError], int] = {
+    ValidationError: 403,
+    UpstreamError: 503,
+}
+
+
+def _error_status(exc: ProxyError) -> int:
+    return _ERROR_STATUS.get(type(exc), 500)
+
+
+# --------------------------------------------------------------------------- #
+# Pydantic models
+# --------------------------------------------------------------------------- #
+
+class _BaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CredentialPayload(BaseModel):
+    """Wire shape returned to the agent via creds.sock / credential_process."""
+    Version: int = 1
+    AccessKeyId: str
+    SecretAccessKey: str
+    Expiration: str  # ISO 8601
+
+
+class _ErrorBody(_BaseModel):
+    Code: str
+    Message: str
+
+
+class _ErrorEnvelope(_BaseModel):
+    Error: _ErrorBody
+
+
+# --------------------------------------------------------------------------- #
 # Hostname → (service, region) parsing
 # --------------------------------------------------------------------------- #
 
 _AWS_HOST_PATTERNS = [
     (re.compile(r"^([a-z0-9-]+)\.([a-z]+-[a-z]+-\d+)\.amazonaws\.com$"), lambda m: (m.group(1), m.group(2))),
-    (re.compile(r"^s3\.amazonaws\.com$"), lambda m: ("s3", "us-east-1")),
-    (re.compile(r"^sts\.amazonaws\.com$"), lambda m: ("sts", "us-east-1")),
+    (re.compile(r"^s3\.amazonaws\.com$"),          lambda m: ("s3",  "us-east-1")),
+    (re.compile(r"^sts\.amazonaws\.com$"),         lambda m: ("sts", "us-east-1")),
     (re.compile(r"^([a-z0-9-]+)\.amazonaws\.com$"), lambda m: (m.group(1), "us-east-1")),
-    (re.compile(r"^[^.]+\.s3\.amazonaws\.com$"), lambda m: ("s3", "us-east-1")),
+    (re.compile(r"^[^.]+\.s3\.amazonaws\.com$"),   lambda m: ("s3",  "us-east-1")),
     (re.compile(r"^[^.]+\.s3\.([a-z]+-[a-z]+-\d+)\.amazonaws\.com$"), lambda m: ("s3", m.group(1))),
 ]
 
@@ -88,12 +148,19 @@ def parse_aws_host(host: str) -> tuple[str, str] | None:
 # Per-client credential store
 # --------------------------------------------------------------------------- #
 
-@dataclasses.dataclass
-class _ClientCred:
+class _ClientCred(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     access_key_id: str
     secret_access_key: str
-    prev_secret: str | None
+    prev_secret: str | None = None
     expiry: datetime
+
+    def to_payload(self) -> CredentialPayload:
+        return CredentialPayload(
+            AccessKeyId=self.access_key_id,
+            SecretAccessKey=self.secret_access_key,
+            Expiration=self.expiry.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
 
 
 def _new_access_key_id() -> str:
@@ -102,29 +169,21 @@ def _new_access_key_id() -> str:
 
 
 class CredentialStore:
-    """
-    Issues and tracks one unique keypair per socket connection.
-    Each call to issue() returns a new keypair and registers it so that
-    validate() can look up the secret by access_key_id.
-    """
+    """Issues and tracks one unique keypair per socket connection."""
 
     def __init__(self) -> None:
         self._store: dict[str, _ClientCred] = {}
         self._lock = threading.Lock()
 
     def issue(self) -> _ClientCred:
-        access_key_id = _new_access_key_id()
-        secret = secrets.token_hex(32)
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=PROXY_KEYPAIR_TTL)
         cred = _ClientCred(
-            access_key_id=access_key_id,
-            secret_access_key=secret,
-            prev_secret=None,
-            expiry=expiry,
+            access_key_id=_new_access_key_id(),
+            secret_access_key=secrets.token_hex(32),
+            expiry=datetime.now(timezone.utc) + timedelta(seconds=PROXY_KEYPAIR_TTL),
         )
         with self._lock:
-            self._store[access_key_id] = cred
-        log.info("Issued proxy keypair access_key_id=%s expiry=%s", access_key_id, expiry)
+            self._store[cred.access_key_id] = cred
+        log.info("Issued proxy keypair access_key_id=%s expiry=%s", cred.access_key_id, cred.expiry)
         return cred
 
     def valid_secrets_for(self, access_key_id: str) -> list[str] | None:
@@ -133,49 +192,54 @@ class CredentialStore:
             cred = self._store.get(access_key_id)
         if cred is None:
             return None
-        result = [cred.secret_access_key]
-        if cred.prev_secret:
-            result.append(cred.prev_secret)
-        return result
-
-    def credential_json(self, cred: _ClientCred) -> bytes:
-        payload = {
-            "Version": 1,
-            "AccessKeyId": cred.access_key_id,
-            "SecretAccessKey": cred.secret_access_key,
-            "Expiration": cred.expiry.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        return json.dumps(payload).encode()
+        return [cred.secret_access_key, *([cred.prev_secret] if cred.prev_secret else [])]
 
 
 # --------------------------------------------------------------------------- #
 # Unix socket credential server
 # --------------------------------------------------------------------------- #
 
-def _serve_creds(sock_path: str, store: CredentialStore) -> None:
+def _prepare_socket_path(sock_path: Path) -> None:
+    """
+    Remove a stale socket file if the path exists but no daemon is listening.
+    Raises if a live server is already bound there.
+    """
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    if not sock_path.exists():
+        return
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.connect(str(sock_path))
+        probe.close()
+        raise ProxyError(f"A server is already listening on {sock_path}")
+    except ConnectionRefusedError:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    finally:
+        probe.close()
+
+
+def _serve_creds(sock_path: Path, store: CredentialStore) -> None:
     """Issue a fresh keypair per connection and send it to the client (blocking)."""
-    sock_dir = os.path.dirname(sock_path)
-    if sock_dir:
-        os.makedirs(sock_dir, exist_ok=True)
-    if os.path.exists(sock_path):
-        os.unlink(sock_path)
+    _prepare_socket_path(sock_path)
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as srv:
-        srv.bind(sock_path)
-        os.chmod(sock_path, 0o600)
+        srv.bind(str(sock_path))
+        sock_path.chmod(0o600)
         srv.listen()
         log.info("Credential socket listening at %s", sock_path)
         while True:
             try:
                 conn, _ = srv.accept()
                 with conn:
-                    cred = store.issue()
-                    conn.sendall(store.credential_json(cred))
+                    payload = store.issue().to_payload()
+                    conn.sendall(payload.model_dump_json().encode())
             except Exception as exc:
                 log.error("creds.sock error: %s", exc)
 
 
-def start_creds_server(sock_path: str, store: CredentialStore) -> None:
+def start_creds_server(sock_path: Path, store: CredentialStore) -> None:
     t = threading.Thread(target=_serve_creds, args=(sock_path, store), daemon=True)
     t.start()
 
@@ -200,7 +264,7 @@ def _parse_auth_header(auth: str) -> dict[str, str] | None:
     prefix = "AWS4-HMAC-SHA256 "
     if not auth.startswith(prefix):
         return None
-    parts = {}
+    parts: dict[str, str] = {}
     for part in auth[len(prefix):].split(","):
         part = part.strip()
         if "=" in part:
@@ -221,7 +285,6 @@ def validate_sigv4(flow: http.HTTPFlow, store: CredentialStore) -> bool:
         log.warning("Missing or malformed Authorization header")
         return False
 
-    # Credential field: <access_key>/<date>/<region>/<service>/aws4_request
     cred_parts = parsed["Credential"].split("/")
     if len(cred_parts) != 5:
         log.warning("Malformed Credential field: %s", parsed["Credential"])
@@ -236,19 +299,17 @@ def validate_sigv4(flow: http.HTTPFlow, store: CredentialStore) -> bool:
     signed_headers = parsed["SignedHeaders"].split(";")
     received_sig = parsed["Signature"]
 
-    canonical_headers = ""
-    for h in signed_headers:
-        canonical_headers += h + ":" + flow.request.headers.get(h, "").strip() + "\n"
-
+    canonical_headers = "".join(
+        f"{h}:{flow.request.headers.get(h, '').strip()}\n"
+        for h in signed_headers
+    )
     body = flow.request.content or b""
     body_hash = hashlib.sha256(body).hexdigest()
-
     parsed_url = urlparse(flow.request.pretty_url)
     canonical_uri = parsed_url.path or "/"
     canonical_qs = "&".join(
         sorted(f"{k}={v}" for k, vs in parse_qs(parsed_url.query, keep_blank_values=True).items() for v in vs)
     )
-
     canonical_request = "\n".join([
         flow.request.method,
         canonical_uri,
@@ -283,33 +344,27 @@ def validate_sigv4(flow: http.HTTPFlow, store: CredentialStore) -> bool:
 
 class ElhazCredentialCache:
     def __init__(self, config_name: str) -> None:
-        self.config_name = config_name
+        self._config_name = config_name
         self._creds: Credentials | None = None
         self._expiry: datetime | None = None
 
     def _needs_refresh(self) -> bool:
         if self._creds is None or self._expiry is None:
             return True
-        remaining = (self._expiry - datetime.now(timezone.utc)).total_seconds()
-        return remaining < REFRESH_BEFORE_EXPIRY_SECONDS
+        return (self._expiry - datetime.now(timezone.utc)).total_seconds() < REFRESH_BEFORE_EXPIRY_SECONDS
 
     def get(self) -> Credentials:
         if self._needs_refresh():
             self._refresh()
-        return self._creds
+        return self._creds  # type: ignore[return-value]
 
     def _refresh(self) -> None:
-        log.info("Fetching fresh credentials from elhaz (config=%s)", self.config_name)
+        log.info("Fetching fresh credentials from elhaz (config=%s)", self._config_name)
         cmd = ["elhaz"]
         if ELHAZ_SOCKET_PATH:
             cmd += ["--socket-path", ELHAZ_SOCKET_PATH]
-        cmd += ["export", "--format", "credential-process", "-n", self.config_name]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        cmd += ["export", "--format", "credential-process", "-n", self._config_name]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         data = json.loads(result.stdout)
         self._creds = Credentials(
             access_key=data["AccessKeyId"],
@@ -335,6 +390,17 @@ _AUTH_HEADERS = {
 }
 
 
+def _aws_error_response(exc: ProxyError) -> http.Response:
+    body = _ErrorEnvelope(
+        Error=_ErrorBody(Code=exc.code, Message=str(exc))
+    ).model_dump_json()
+    return http.Response.make(
+        _error_status(exc),
+        body,
+        {"Content-Type": "application/json"},
+    )
+
+
 class ElhazResignAddon:
     def __init__(self) -> None:
         self.store = CredentialStore()
@@ -342,31 +408,26 @@ class ElhazResignAddon:
         start_creds_server(PROXY_SOCK_PATH, self.store)
 
     def request(self, flow: http.HTTPFlow) -> None:
-        host = flow.request.pretty_host
-        parsed = parse_aws_host(host)
+        parsed = parse_aws_host(flow.request.pretty_host)
         if parsed is None:
             return
 
         service, region = parsed
-        log.info("Intercepted AWS request: host=%s service=%s region=%s method=%s",
-                 host, service, region, flow.request.method)
+        log.info(
+            "Intercepted AWS request: host=%s service=%s region=%s method=%s",
+            flow.request.pretty_host, service, region, flow.request.method,
+        )
 
-        # Validate that the request was signed with a proxy-issued keypair
+        try:
+            self._handle(flow, service, region)
+        except ProxyError as exc:
+            log.warning("Rejected request: %s", exc)
+            flow.response = _aws_error_response(exc)
+
+    def _handle(self, flow: http.HTTPFlow, service: str, region: str) -> None:
         if not validate_sigv4(flow, self.store):
-            log.warning("Rejected request: invalid proxy SigV4 signature")
-            flow.response = http.Response.make(
-                403,
-                json.dumps({
-                    "Error": {
-                        "Code": "InvalidClientTokenId",
-                        "Message": "The security token included in the request is invalid.",
-                    }
-                }),
-                {"Content-Type": "application/json"},
-            )
-            return
+            raise ValidationError("The security token included in the request is invalid.")
 
-        # Strip proxy auth headers before re-signing
         for h in list(flow.request.headers.keys()):
             if h.lower() in _AUTH_HEADERS:
                 del flow.request.headers[h]
@@ -374,37 +435,22 @@ class ElhazResignAddon:
         try:
             creds = self.elhaz.get()
         except Exception as exc:
-            log.error("Failed to fetch elhaz credentials: %s", exc)
-            flow.response = http.Response.make(
-                503,
-                json.dumps({
-                    "Error": {
-                        "Code": "ServiceUnavailable",
-                        "Message": "Proxy could not obtain IAC credentials.",
-                    }
-                }),
-                {"Content-Type": "application/json"},
-            )
-            return
+            raise UpstreamError("Proxy could not obtain IAC credentials.") from exc
 
-        url = flow.request.pretty_url
-        body = flow.request.content or b""
         aws_request = AWSRequest(
             method=flow.request.method,
-            url=url,
-            data=body,
+            url=flow.request.pretty_url,
+            data=flow.request.content or b"",
             headers=dict(flow.request.headers),
         )
-
         SigV4Auth(creds, service, region).add_auth(aws_request)
-
         for key, value in aws_request.headers.items():
             flow.request.headers[key] = value
 
         log.info("Request re-signed for %s/%s", service, region)
 
 
-def load(loader):  # noqa: D103 — mitmproxy hook
+def load(loader) -> None:  # noqa: D103 — mitmproxy hook
     pass
 
 

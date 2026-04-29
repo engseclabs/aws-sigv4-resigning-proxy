@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir mitmproxy botocore elhaz==0.5.1
+RUN pip install --no-cache-dir mitmproxy botocore pydantic elhaz==0.5.1
 
 WORKDIR /proxy
 

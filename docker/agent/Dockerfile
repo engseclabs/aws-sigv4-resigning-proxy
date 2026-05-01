@@ -7,6 +7,9 @@ WORKDIR /agent
 COPY proxy-creds /usr/local/bin/proxy-creds
 RUN chmod +x /usr/local/bin/proxy-creds
 
+COPY get-policy /usr/local/bin/get-policy
+RUN chmod +x /usr/local/bin/get-policy
+
 COPY test_resign.sh /agent/test_resign.sh
 RUN chmod +x /agent/test_resign.sh
 
@@ -19,6 +22,6 @@ region = us-east-1\n' > /root/.aws/config
 
 ENV AWS_PROFILE=proxy
 ENV PROXY_SOCK_PATH=/run/proxy/creds.sock
+ENV ACTION_LOG_PATH=/run/proxy/actions.log
 
-# Keep container running so `docker compose exec agent <cmd>` works.
-CMD ["sleep", "infinity"]
+CMD ["/bin/bash"]

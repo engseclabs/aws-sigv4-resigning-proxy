@@ -86,15 +86,13 @@ def test_handle_raises_upstream_error_when_elhaz_fails():
 def test_handle_strips_inbound_auth_headers():
     addon = _make_addon()
     flow = make_signed_flow()
-    # Mark the old auth value so we can confirm it was replaced, not kept
     old_auth = flow.request.headers.get("authorization")
     flow.request.headers["x-amz-security-token"] = "oldtoken"
     flow.request.headers["x-amz-content-sha256"] = "oldhash"
     addon._handle(flow, "s3", "us-east-1")
-    # x-amz-security-token and x-amz-content-sha256 must be stripped
     assert "x-amz-security-token" not in flow.request.headers
-    assert "x-amz-content-sha256" not in flow.request.headers
-    # authorization must be present but must be the NEW re-signed value
+    # S3SigV4Auth rewrites x-amz-content-sha256 — the old inbound value must be gone
+    assert flow.request.headers.get("x-amz-content-sha256") != "oldhash"
     assert flow.request.headers.get("authorization") != old_auth
 
 

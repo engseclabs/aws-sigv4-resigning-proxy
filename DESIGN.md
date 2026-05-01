@@ -102,22 +102,26 @@ The proxy operates in two modes.
 
 ### Recording mode
 
-All validated requests are forwarded to AWS. For each forwarded request, the proxy logs:
-- AWS service (derived from the endpoint hostname)
-- API action (from the `Action` parameter or the request URL path, depending on the service's protocol)
-- Resource ARN (from the request parameters, where parseable)
-- Request timestamp and agent identity
+All validated requests are forwarded to AWS. Recording happens through two complementary mechanisms:
 
-The log accumulates a behavioral profile of what the agent actually does, not what someone guessed it would do when writing an IAM policy.
+**iamlive CSM sidecar** — [iamlive](https://github.com/iann0036/iamlive) runs alongside mitmproxy in the proxy container in CSM (client-side monitoring) mode. The AWS SDK in the agent container emits UDP telemetry to iamlive on every API call (`AWS_CSM_ENABLED=true`, `AWS_CSM_HOST=proxy`). iamlive uses its own maintained mapping dataset (~19,000 entries) to translate SDK calls to canonical `service:Action` strings, then prints a cumulative IAM policy JSON to stdout (visible via `docker compose logs proxy`) on every API call. The policy JSON can be applied directly with `aws iam put-role-policy`, used as a session policy input, or loaded by a future enforcement layer.
+
+**Why iamlive for policy generation rather than in-proxy parsing**
+
+Mapping raw HTTP requests to canonical IAM action strings (`s3:GetObject`, `iam:PassRole`) is non-trivial: AWS uses at least four distinct wire protocols across its services, one SDK call can require multiple IAM actions (e.g. `Lambda.CreateFunction` also requires `iam:PassRole`), and the mapping dataset has ~19,000 entries with resource ARN templates. iamlive maintains this dataset and implements the full mapping logic. Rather than replicate it, the proxy delegates policy generation to iamlive and stays focused on credential isolation and request enforcement.
+
+iamlive proxy mode cannot be chained with mitmproxy (it does not support upstream proxy configuration and requires its own TLS termination). CSM mode sidesteps this entirely: it receives SDK telemetry over UDP out-of-band, independent of the HTTPS request path.
 
 ### Enforcement mode
 
-The proxy loads an allowlist derived from a prior recording session (or authored directly). Each inbound request is checked against the allowlist:
+The proxy loads an allowlist derived from a prior recording session (or authored directly). The natural allowlist format is the IAM policy JSON produced by iamlive — standard `{"Version":"2012-10-17","Statement":[...]}` — which means the recording artifact is directly usable as the enforcement input with no translation step. Each inbound request is checked against the allowlist:
 - Match: forward and re-sign.
 - No match: block and return a forged AWS error response (see below).
 - No match, interactive: pause, surface the request to a human for approval, add to allowlist on approval, block on denial.
 
 The "carve as you go" model — recording first, then switching to enforcement — inverts the traditional least-privilege workflow. Instead of authoring a policy before running the agent (which requires predicting what the agent will do), you run the agent in recording mode, observe its real behavior, and derive the policy from that. The resulting allowlist reflects actual usage, not a guess.
+
+Because the allowlist is standard IAM policy JSON, it is also directly usable as a session policy scoped at `AssumeRole` time, as an inline role policy, or as input to other IAM tooling — the proxy enforcement layer and AWS IAM are speaking the same language.
 
 ### Why this is different from AWS session policies
 

@@ -16,7 +16,9 @@ The proxy is the workaround: it holds an [elhaz](https://github.com/61418/elhaz)
 
 **Docker isolation** — the agent container gets only `creds.sock` and the mitmproxy port. No elhaz socket, no IAC credentials, no host network access. The proxy is the agent's only path to AWS. Isolation is a property of the environment, not a property of the agent.
 
-**Recording and enforcement modes** *(planned)* — see [DESIGN.md](DESIGN.md).
+**Recording mode** — [iamlive](https://github.com/iann0036/iamlive) runs as a CSM sidecar on the proxy container, receiving SDK telemetry from the agent over UDP and printing a standard IAM policy JSON to stdout — a ready-to-use least-privilege policy derived from what the agent actually called.
+
+**Enforcement mode** *(planned)* — see [DESIGN.md](DESIGN.md).
 
 ## Quickstart
 
@@ -74,19 +76,32 @@ host
 ├── elhaz daemon  ←─── ~/.elhaz/sock/daemon.sock (bind-mounted into proxy)
 │
 ├── proxy container
-│   ├── mitmdump :8080          — intercepts and re-signs AWS requests
-│   ├── elhaz (in /opt/elhaz-venv) — fetches IAC credentials via mounted socket
-│   ├── /run/proxy/creds.sock   — vends per-client proxy keypairs (named volume)
-│   └── /run/mitmproxy/         — CA cert (named volume)
+│   ├── mitmdump :8080              — intercepts and re-signs AWS requests
+│   ├── iamlive (CSM, UDP :31000)   — receives SDK telemetry, prints policy to stdout
+│   ├── elhaz (in /opt/elhaz-venv)  — fetches IAC credentials via mounted socket
+│   ├── /run/proxy/creds.sock       — vends per-client proxy keypairs (named volume)
+│   └── /run/mitmproxy/             — CA cert (named volume)
 │
 └── agent container
-    ├── AWS SDK / CLI           — signs requests with proxy keypair
-    ├── proxy-creds             — credential_process helper reads creds.sock
-    ├── HTTPS_PROXY=proxy:8080  — routes all AWS traffic through proxy
+    ├── AWS SDK / CLI               — signs requests with proxy keypair
+    ├── proxy-creds                 — credential_process helper reads creds.sock
+    ├── HTTPS_PROXY=proxy:8080      — routes all AWS traffic through proxy
+    ├── AWS_CSM_ENABLED=true        — SDK emits call telemetry over UDP
+    ├── AWS_CSM_HOST=proxy          — telemetry destination: iamlive on proxy container
     └── (no elhaz socket, no IAC credentials)
 ```
 
 The agent is on an internal Docker bridge network. Its only internet egress is through the proxy container.
+
+### Reading the recorded policy
+
+After running the agent, inspect the IAM policy iamlive accumulated:
+
+```bash
+docker compose logs proxy | grep -A100 '"Version"'
+```
+
+The policy is printed to stdout on every API call and contains only the actions the agent actually called — usable directly with `aws iam put-role-policy` or as a session policy in a future enforcement phase.
 
 > **Note on dependencies:** mitmproxy 12.x and elhaz 0.5.x have an irreconcilable `typing-extensions` version conflict. The proxy image resolves this by installing elhaz in a separate venv (`/opt/elhaz-venv`) and symlinking its binary onto `PATH`. They never share a Python environment.
 
@@ -129,9 +144,9 @@ bash dev_setup.sh aws sts get-caller-identity
 |---|---|
 | `elhaz_resign.py` | mitmproxy addon — issues per-client keypairs, validates inbound SigV4, re-signs with elhaz credentials |
 | `proxy-creds` | `credential_process` helper — connects to `creds.sock` and prints the keypair JSON the AWS SDK expects |
-| `docker/proxy/Dockerfile` | Proxy image — mitmproxy + botocore + pydantic; elhaz in isolated venv |
+| `docker/proxy/Dockerfile` | Proxy image — mitmproxy + botocore + pydantic; elhaz in isolated venv; iamlive CSM binary |
 | `docker/agent/Dockerfile` | Agent image — AWS CLI + proxy-creds wired up via `credential_process` |
-| `docker-compose.yml` | Wires proxy and agent together with correct volume mounts and network isolation |
+| `docker-compose.yml` | Wires proxy and agent together; exposes iamlive CSM UDP port; injects CSM env vars into agent |
 | `setup_venv.sh` | Creates a local `venv/` for running without Docker |
 | `start_proxy.sh` | Starts `mitmdump` locally on port 8080 |
 | `dev_setup.sh` | Fetches a proxy keypair from `creds.sock` and exports `AWS_*` / `HTTPS_PROXY` env vars for local use; sourceable or pass a command to exec |

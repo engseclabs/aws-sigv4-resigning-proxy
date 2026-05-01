@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 
-from botocore.auth import SigV4Auth
+from botocore.auth import S3SigV4Auth, SigV4Auth
 from botocore.awsrequest import AWSRequest
 from mitmproxy import http
 
@@ -79,7 +79,8 @@ class ElhazResignAddon:
             data=flow.request.content or b"",
             headers=dict(flow.request.headers),
         )
-        SigV4Auth(creds, service, region).add_auth(aws_request)
+        auth_cls = S3SigV4Auth if service == "s3" else SigV4Auth
+        auth_cls(creds, service, region).add_auth(aws_request)
         for key, value in aws_request.headers.items():
             flow.request.headers[key] = value
 

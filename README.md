@@ -14,48 +14,89 @@ This uses [mitmproxy](https://mitmproxy.org/) under the hood, with [elhaz](https
 
 ## How it works
 
+There are two things going on inside the proxy: it vends fake credentials to the agent, and it rewrites outbound requests to use real ones. Here they are separately, then together.
+
+### 1. Credential replacement
+
+The agent never sees real AWS credentials. The proxy generates fake-but-syntactically-valid keypairs and hands them out over a Unix socket. The agent's SDK signs requests with these fake keys, exactly as it would with real ones.
+
 ```mermaid
-graph TD
-    subgraph host["Host"]
-        elhaz["elhaz daemon<br/>(~/.elhaz/sock/daemon.sock)"]
-    end
+graph LR
+    agent["Agent<br/>(AWS SDK)"]
+    helper["proxy-creds<br/>(credential_process)"]
+    vendor["creds.sock<br/>(keypair vendor)"]
 
-    subgraph proxy_net["Docker bridge network (isolated)"]
-        subgraph proxy_container["Proxy container"]
-            mitmdump["mitmdump :8080<br/>(intercepts, validates SigV4,<br/>resolves IAM actions, re-signs)"]
-            elhaz_venv["elhaz (isolated venv)<br/>(fetches IAC credentials)"]
-            creds_sock["creds.sock<br/>(vends per-client proxy keypairs)"]
-            ca_vol["CA volume<br/>(/run/mitmproxy)"]
-        end
+    agent -- "1. needs credentials" --> helper
+    helper -- "2. requests keypair" --> vendor
+    vendor -- "3. fake AKID + secret" --> helper
+    helper -- "4. returns to SDK" --> agent
 
-        subgraph agent_container["Agent container"]
-            aws_sdk["AWS SDK / CLI<br/>(signs with proxy keypair)"]
-            proxy_creds["proxy-creds helper<br/>(credential_process → creds.sock)"]
-            https_proxy["HTTPS_PROXY=proxy:8080"]
-        end
-    end
-
-    elhaz -- "bind-mounted socket" --> elhaz_venv
-    creds_sock -- "named volume<br/>(creds.sock only)" --> proxy_creds
-    ca_vol -- "named volume<br/>(CA cert)" --> agent_container
-    aws_sdk -- "HTTPS via proxy" --> mitmdump
-    mitmdump -- "re-signed request" --> Internet["AWS APIs"]
-
-    style host fill:#f5f5f5,stroke:#999
-    style proxy_container fill:#dbeafe,stroke:#3b82f6
-    style agent_container fill:#dcfce7,stroke:#22c55e
-    style proxy_net fill:#fefce8,stroke:#eab308
+    style agent fill:#dcfce7,stroke:#22c55e
+    style vendor fill:#dbeafe,stroke:#3b82f6
 ```
 
-**Credential carrier** — the proxy generates fake-but-syntactically-valid AWS keypairs and vends them to agent clients over a Unix socket (`creds.sock`). There is no IAM identity behind these keys. Each socket connection gets its own distinct keypair so the proxy can tell clients apart. The agent's AWS SDK uses the keypair to sign requests; if the keypair leaks, it is useless to AWS.
+The fake keypair has no IAM identity behind it. AWS would reject it. It only works because the proxy is going to swap it out before the request leaves.
 
-**Local SigV4 validation** — the proxy recomputes the HMAC-SHA256 signature from the inbound request and looks up the signing secret by `access_key_id`. Requests signed with unknown or mismatched keys are rejected with a forged `InvalidClientTokenId` 403 before any IAC credential fetch occurs.
+### 2. Request interception and re-signing
 
-**Docker isolation** — the agent container gets only `creds.sock` and the mitmproxy port. No elhaz socket, no IAC credentials, no host network access. The proxy is the agent's only path to AWS.
+When the agent makes an AWS API call, the request goes through `mitmdump` (HTTPS proxy on port 8080). mitmdump validates the SigV4 signature locally using the secret it issued, then strips that signature and re-signs the request with real credentials fetched from elhaz.
 
-**Recording mode** — every validated request is forwarded and the proxy logs the resolved IAM action(s). Run the agent against a representative workload, collect the log, and you have a least-privilege policy derived from what the agent actually called rather than what someone guessed it would need.
+```mermaid
+graph LR
+    agent["Agent<br/>(signs with fake key)"]
+    mitm["mitmdump :8080<br/>(validate → re-sign)"]
+    elhaz["elhaz daemon<br/>(real IAC credentials)"]
+    aws["AWS APIs"]
 
-**Enforcement mode** — set `PROXY_MODE=enforce` and point `ALLOWLIST_PATH` at an IAM policy JSON file. The proxy resolves each request to IAM action strings, checks them against the allowlist, and returns a forged `AccessDenied` 403 for anything not permitted. The agent cannot distinguish a proxy-enforced denial from a real IAM denial.
+    agent -- "1. HTTPS request<br/>(fake SigV4)" --> mitm
+    mitm -- "2. fetch real creds" --> elhaz
+    elhaz -- "3. session creds" --> mitm
+    mitm -- "4. re-signed request<br/>(real SigV4)" --> aws
+
+    style agent fill:#dcfce7,stroke:#22c55e
+    style mitm fill:#dbeafe,stroke:#3b82f6
+    style elhaz fill:#f5f5f5,stroke:#999
+    style aws fill:#fef3c7,stroke:#d97706
+```
+
+If the inbound signature doesn't validate (unknown access key, mismatched HMAC), mitmdump returns a forged `InvalidClientTokenId` 403 without ever calling elhaz. In enforce mode, it also resolves the request to its IAM action and returns a forged `AccessDenied` 403 if the action isn't on the allowlist.
+
+### 3. Putting it together
+
+Both flows live in the same proxy container, on a Docker bridge network the agent shares but cannot escape. The agent's only path to AWS is through mitmdump.
+
+```mermaid
+graph TB
+    subgraph host["Host"]
+        elhaz["elhaz daemon"]
+    end
+
+    subgraph net["Docker bridge network"]
+        subgraph proxy["Proxy container"]
+            vendor["creds.sock<br/>(vends fake keypairs)"]
+            mitm["mitmdump :8080<br/>(validates + re-signs)"]
+        end
+
+        subgraph agentbox["Agent container"]
+            agent["AWS SDK / CLI"]
+        end
+    end
+
+    aws["AWS APIs"]
+
+    agent -- "fetch fake creds" --> vendor
+    agent -- "HTTPS (fake SigV4)" --> mitm
+    mitm -- "fetch real creds" --> elhaz
+    mitm -- "re-signed request" --> aws
+
+    style host fill:#f5f5f5,stroke:#999
+    style proxy fill:#dbeafe,stroke:#3b82f6
+    style agentbox fill:#dcfce7,stroke:#22c55e
+    style net fill:#fefce8,stroke:#eab308
+    style aws fill:#fef3c7,stroke:#d97706
+```
+
+The agent container has no access to the elhaz socket and no IAC credentials of its own. It only sees `creds.sock` (fake keypairs) and the mitmdump port. Real credentials never cross the container boundary.
 
 ## Quickstart
 

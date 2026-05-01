@@ -102,15 +102,7 @@ The proxy operates in two modes.
 
 ### Recording mode
 
-All validated requests are forwarded to AWS. Recording happens through two complementary mechanisms:
-
-**iamlive CSM sidecar** — [iamlive](https://github.com/iann0036/iamlive) runs alongside mitmproxy in the proxy container in CSM (client-side monitoring) mode. The AWS SDK in the agent container emits UDP telemetry to iamlive on every API call (`AWS_CSM_ENABLED=true`, `AWS_CSM_HOST=proxy`). iamlive uses its own maintained mapping dataset (~19,000 entries) to translate SDK calls to canonical `service:Action` strings, then prints a cumulative IAM policy JSON to stdout (visible via `docker compose logs proxy`) on every API call. The policy JSON can be applied directly with `aws iam put-role-policy`, used as a session policy input, or used directly as the `ALLOWLIST_PATH` input when switching the proxy to enforcement mode.
-
-**Why iamlive for policy generation rather than in-proxy parsing**
-
-Mapping raw HTTP requests to canonical IAM action strings (`s3:GetObject`, `iam:PassRole`) is non-trivial: AWS uses at least four distinct wire protocols across its services, one SDK call can require multiple IAM actions (e.g. `Lambda.CreateFunction` also requires `iam:PassRole`), and the mapping dataset has ~19,000 entries with resource ARN templates. iamlive maintains this dataset and implements the full mapping logic. Rather than replicate it, the proxy delegates policy generation to iamlive and stays focused on credential isolation and request enforcement.
-
-iamlive proxy mode cannot be chained with mitmproxy (it does not support upstream proxy configuration and requires its own TLS termination). CSM mode sidesteps this entirely: it receives SDK telemetry over UDP out-of-band, independent of the HTTPS request path.
+All validated requests are forwarded to AWS. The proxy resolves each request to IAM action strings (using the same logic as enforcement mode) and logs them. Running the agent against a representative workload produces a behavioral profile — what the agent actually called, not what someone guessed it would need.
 
 ### Enforcement mode
 
@@ -118,9 +110,9 @@ Set `PROXY_MODE=enforce` and `ALLOWLIST_PATH=/path/to/policy.json`. The proxy re
 - Match: forward and re-sign.
 - No match: block and return a forged `AccessDenied` 403 (see [Error forgery](#error-forgery-for-blocked-requests)).
 
-The natural allowlist format is the IAM policy JSON produced by iamlive — standard `{"Version":"2012-10-17","Statement":[...]}` — which means the recording artifact is directly usable as the enforcement input with no translation step.
+The allowlist is standard IAM policy JSON (`{"Version":"2012-10-17","Statement":[...]}`), usable directly with `aws iam put-role-policy` or as a session policy.
 
-**Action resolution** — the proxy resolves HTTP requests to IAM action strings in-process, without calling iamlive or any external service. `proxy/resolver.py` dispatches on the AWS wire protocol for each service:
+**Action resolution** — the proxy resolves HTTP requests to IAM action strings in-process with no external dependencies. `proxy/resolver.py` dispatches on the AWS wire protocol for each service:
 
 - **`json` protocol** (DynamoDB, KMS, Lambda, etc.): reads the operation name from the `X-Amz-Target` header.
 - **`query`/`ec2` protocol** (IAM, STS, EC2, SQS, etc.): reads the `Action` field from the URL-encoded POST body.

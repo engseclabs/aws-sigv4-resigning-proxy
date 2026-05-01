@@ -104,7 +104,7 @@ The proxy operates in two modes.
 
 All validated requests are forwarded to AWS. Recording happens through two complementary mechanisms:
 
-**iamlive CSM sidecar** — [iamlive](https://github.com/iann0036/iamlive) runs alongside mitmproxy in the proxy container in CSM (client-side monitoring) mode. The AWS SDK in the agent container emits UDP telemetry to iamlive on every API call (`AWS_CSM_ENABLED=true`, `AWS_CSM_HOST=proxy`). iamlive uses its own maintained mapping dataset (~19,000 entries) to translate SDK calls to canonical `service:Action` strings, then accumulates a standard IAM policy JSON written to `IAMLIVE_OUTPUT_FILE` (default `/run/proxy/policy.json`) every few seconds and on exit. The policy JSON can be applied directly with `aws iam put-role-policy`, used as a session policy input, or loaded by a future enforcement layer.
+**iamlive CSM sidecar** — [iamlive](https://github.com/iann0036/iamlive) runs alongside mitmproxy in the proxy container in CSM (client-side monitoring) mode. The AWS SDK in the agent container emits UDP telemetry to iamlive on every API call (`AWS_CSM_ENABLED=true`, `AWS_CSM_HOST=proxy`). iamlive uses its own maintained mapping dataset (~19,000 entries) to translate SDK calls to canonical `service:Action` strings, then prints a cumulative IAM policy JSON to stdout (visible via `docker compose logs proxy`) on every API call. The policy JSON can be applied directly with `aws iam put-role-policy`, used as a session policy input, or loaded by a future enforcement layer.
 
 **Why iamlive for policy generation rather than in-proxy parsing**
 

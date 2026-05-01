@@ -8,7 +8,7 @@ services:
       - ${ELHAZ_SOCK:-~/.elhaz/sock/daemon.sock}:/tmp/elhaz.sock:ro
       # elhaz configs from the host — tells the proxy which role to assume
       - ${ELHAZ_CONFIG_DIR:-~/.elhaz/configs}:/root/.elhaz/configs:ro
-      # shared volume: proxy writes creds.sock here, agent reads it
+      # shared volume: proxy writes creds.sock + policy.json here, agent reads creds.sock
       - proxy-run:/run/proxy
       # mitmproxy CA cert persisted across restarts so the agent trusts it
       - mitm-ca:/run/mitmproxy
@@ -17,8 +17,11 @@ services:
       # tell elhaz inside the container to reach the host daemon via mounted socket
       ELHAZ_SOCKET_PATH: /tmp/elhaz.sock
       PROXY_SOCK_PATH: /run/proxy/creds.sock
+      IAMLIVE_OUTPUT_FILE: /run/proxy/policy.json
     ports:
       - "8080:8080"
+      # iamlive CSM listener — agent SDKs send UDP events here
+      - "31000:31000/udp"
     networks:
       - proxy-net
     healthcheck:
@@ -46,6 +49,10 @@ services:
       HTTPS_PROXY: http://proxy:8080
       HTTP_PROXY: http://proxy:8080
       PROXY_SOCK_PATH: /run/proxy/creds.sock
+      # CSM: direct SDK telemetry to iamlive running on the proxy container
+      AWS_CSM_ENABLED: "true"
+      AWS_CSM_HOST: proxy
+      AWS_CSM_PORT: "31000"
     # agent is on the internal network only — proxy has the only internet egress
     networks:
       - proxy-net

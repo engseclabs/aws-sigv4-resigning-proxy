@@ -9,6 +9,13 @@ RUN pip install --no-cache-dir mitmproxy==12.2.2 botocore pydantic && \
     /opt/elhaz-venv/bin/pip install --no-cache-dir elhaz==0.5.1 && \
     ln -s /opt/elhaz-venv/bin/elhaz /usr/local/bin/elhaz
 
+# Install iamlive (CSM listener — records agent AWS calls as an IAM policy)
+ARG IAMLIVE_VERSION=1.1.28
+RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates && \
+    curl -fsSL "https://github.com/iann0036/iamlive/releases/download/v${IAMLIVE_VERSION}/iamlive_${IAMLIVE_VERSION}_linux_amd64.tar.gz" \
+      | tar -xz -C /usr/local/bin iamlive && \
+    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /proxy
 
 COPY elhaz_resign.py .
@@ -16,11 +23,24 @@ COPY proxy/ proxy/
 
 ENV PROXY_SOCK_PATH=/run/proxy/creds.sock
 ENV ELHAZ_SOCKET_PATH=/tmp/elhaz.sock
+ENV IAMLIVE_OUTPUT_FILE=/run/proxy/policy.json
 
 EXPOSE 8080
 
+# Start iamlive in CSM mode (background), then mitmproxy (foreground).
+# iamlive listens on UDP 0.0.0.0:31000 so the agent container can reach it
+# over the shared proxy-net bridge. Policy is written to the shared volume at
+# IAMLIVE_OUTPUT_FILE on every refresh and on exit.
 CMD ["sh", "-c", \
   "mkdir -p /run/proxy && \
+   iamlive \
+     --mode csm \
+     --host 0.0.0.0 \
+     --output-file \"${IAMLIVE_OUTPUT_FILE}\" \
+     --refresh-rate 5 \
+     --sort-alphabetical \
+     --force-wildcard-resource \
+     & \
    mitmdump \
      --listen-port 8080 \
      --scripts /proxy/elhaz_resign.py \

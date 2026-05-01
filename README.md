@@ -51,9 +51,129 @@ This uses [mitmproxy](https://mitmproxy.org/) under the hood, with [elhaz](https
 
 ## Quickstart
 
-<!-- Quickstart is being rewritten alongside new functionality — placeholder intentional -->
+### Prerequisites
 
-*Coming soon: updated quickstart covering the new setup flow.*
+- Docker and Docker Compose
+- [elhaz](https://github.com/61418/elhaz) installed, daemon running, and the target role added
+
+```bash
+elhaz daemon start
+elhaz daemon add -n sandbox-elhaz   # or whatever IAC role the agent should use
+```
+
+### Step 1 — start the stack
+
+Open two terminal panes. In the first, start the proxy and tail its action stream:
+
+```bash
+ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up --build proxy
+```
+
+You'll see mitmproxy start and a line like `Action log: /run/proxy/actions.log`. Keep this pane visible — resolved IAM actions will print here as they're observed.
+
+### Step 2 — drop into the agent shell
+
+In the second pane, start the agent container and open an interactive shell:
+
+```bash
+ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose run --rm agent
+```
+
+The agent container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-configured. The proxy holds the real IAC credentials; the agent never sees them.
+
+### Step 3 — run AWS commands and watch the policy build
+
+From inside the agent shell, run any AWS commands:
+
+```bash
+aws sts get-caller-identity
+aws s3 ls
+aws iam get-role --role-name MyRole
+```
+
+In the proxy pane you'll see lines like:
+
+```
+[14:32:01] ALLOWED  sts:GetCallerIdentity
+[14:32:09] ALLOWED  s3:ListAllMyBuckets
+[14:32:15] ALLOWED  iam:GetRole
+```
+
+Each line is a distinct IAM action the agent actually called — not a guess.
+
+### Step 4 — extract the policy
+
+When you're done running commands, generate a least-privilege policy from everything observed so far:
+
+```bash
+get-policy
+```
+
+Output:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ProxyRecordedActions",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "s3:ListAllMyBuckets",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Pipe it to a file, tighten the `Resource` fields, and it's ready to use as an IAM policy or a session policy.
+
+### Tear down
+
+```bash
+docker compose down     # stops containers, keeps volumes (CA cert, action log)
+docker compose down -v  # stops containers and removes volumes
+```
+
+## How the containers are wired
+
+```
+host
+├── elhaz daemon  ←─── ~/.elhaz/sock/daemon.sock (bind-mounted into proxy)
+│
+├── proxy container
+│   ├── mitmdump :8080          — intercepts, validates SigV4, resolves IAM actions, re-signs
+│   ├── elhaz (in /opt/elhaz-venv) — fetches IAC credentials via mounted socket
+│   ├── /run/proxy/creds.sock   — vends per-client proxy keypairs (named volume)
+│   └── /run/mitmproxy/         — CA cert (named volume)
+│
+└── agent container
+    ├── AWS SDK / CLI           — signs requests with proxy keypair
+    ├── proxy-creds             — credential_process helper reads creds.sock
+    ├── HTTPS_PROXY=proxy:8080  — routes all AWS traffic through proxy
+    └── (no elhaz socket, no IAC credentials)
+```
+
+The agent is on an internal Docker bridge network. Its only internet egress is through the proxy container.
+
+### Switching to enforcement mode
+
+After running the agent in record mode, build an allowlist from the proxy logs and switch:
+
+```bash
+# Collect the resolved actions from proxy logs (one action per line)
+docker compose logs proxy | grep "Resolved actions" > actions.txt
+
+# Author a policy.json from the observed actions, then:
+PROXY_MODE=enforce ALLOWLIST_PATH=/path/to/policy.json docker compose up -d
+```
+
+The `ALLOWLIST_PATH` file is standard IAM policy JSON — the same format you'd pass to `aws iam put-role-policy`.
+
+> **Note on dependencies:** mitmproxy 12.x and elhaz 0.5.x have an irreconcilable `typing-extensions` version conflict. The proxy image resolves this by installing elhaz in a separate venv (`/opt/elhaz-venv`) and symlinking its binary onto `PATH`. They never share a Python environment.
 
 ## Configuration
 

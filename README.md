@@ -1,29 +1,43 @@
 # aws-sigv4-resigning-proxy
 
+A **credential injection proxy** for AWS: the agent holds proxy-issued fake AWS keys with no IAM identity, and the proxy re-signs outbound requests with real credentials the agent never sees. Isolation is a property of the environment, not the agent — the agent cannot misuse credentials it does not hold.
+
+This uses [mitmproxy](https://mitmproxy.org/) under the hood, with [elhaz](https://github.com/61418/elhaz) as the IAM Identity Center credential source. See the [blog post](./BLOG.md) for the conceptual background on credential injection proxies as a pattern.
+
+## Why this exists
+
+**Credential protection and prompt injection resistance** — an AI agent that holds real AWS credentials can be manipulated into leaking them or using them in unintended ways. Prompt injection is a real attack: if the agent reads attacker-controlled content (a document, a web page, a database row), that content can instruct the agent to exfiltrate its credentials or call arbitrary AWS APIs. The proxy eliminates this risk by ensuring the agent never holds credentials at all. It gets a proxy-issued keypair that has no IAM identity and is useless outside the proxy. Even a fully compromised agent cannot leak credentials it was never given.
+
+**Least-privilege policy generation** — the hardest part of scoping an agent's IAM permissions is knowing what it actually needs. Guessing produces overly broad policies; auditing code is error-prone and misses runtime behavior. The proxy resolves every outbound AWS request to its exact IAM action(s) and logs them. Run the agent against a representative workload and you get a precise, observed permission set — not an estimate.
+
+**IAM Identity Center roles are unmodifiable** — for teams using AWS IAM Identity Center, there is an additional constraint: IAC roles live under `/aws-reserved/` and return `UnmodifiableEntity` on any attempt to modify their trust policy. Session policies are also unreachable because the trust policy only permits `sts:AssumeRoleWithSAML`. The proxy is the workaround: it holds an [elhaz](https://github.com/61418/elhaz) session for the IAC role and re-signs outbound requests, so the agent authenticates to the proxy rather than directly to AWS.
+
+## How it works
+
 ```mermaid
 graph TD
     subgraph host["Host"]
-        elhaz["elhaz daemon\n(~/.elhaz/sock/daemon.sock)"]
+        elhaz["elhaz daemon<br/>(~/.elhaz/sock/daemon.sock)"]
     end
 
     subgraph proxy_net["Docker bridge network (isolated)"]
         subgraph proxy_container["Proxy container"]
-            mitmdump["mitmdump :8080\n(intercepts, validates SigV4,\nresolves IAM actions, re-signs)"]
-            elhaz_venv["elhaz (isolated venv)\n(fetches IAC credentials)"]
-            creds_sock["creds.sock\n(vends per-client proxy keypairs)"]
-            ca_vol["CA volume\n(/run/mitmproxy)"]
+            mitmdump["mitmdump :8080<br/>(intercepts, validates SigV4,<br/>resolves IAM actions, re-signs)"]
+            elhaz_venv["elhaz (isolated venv)<br/>(fetches IAC credentials)"]
+            creds_sock["creds.sock<br/>(vends per-client proxy keypairs)"]
+            ca_vol["CA volume<br/>(/run/mitmproxy)"]
         end
 
         subgraph agent_container["Agent container"]
-            aws_sdk["AWS SDK / CLI\n(signs with proxy keypair)"]
-            proxy_creds["proxy-creds helper\n(credential_process → creds.sock)"]
+            aws_sdk["AWS SDK / CLI<br/>(signs with proxy keypair)"]
+            proxy_creds["proxy-creds helper<br/>(credential_process → creds.sock)"]
             https_proxy["HTTPS_PROXY=proxy:8080"]
         end
     end
 
     elhaz -- "bind-mounted socket" --> elhaz_venv
-    creds_sock -- "named volume\n(creds.sock only)" --> proxy_creds
-    ca_vol -- "named volume\n(CA cert)" --> agent_container
+    creds_sock -- "named volume<br/>(creds.sock only)" --> proxy_creds
+    ca_vol -- "named volume<br/>(CA cert)" --> agent_container
     aws_sdk -- "HTTPS via proxy" --> mitmdump
     mitmdump -- "re-signed request" --> Internet["AWS APIs"]
 
@@ -32,12 +46,6 @@ graph TD
     style agent_container fill:#dcfce7,stroke:#22c55e
     style proxy_net fill:#fefce8,stroke:#eab308
 ```
-
-A **credential injection proxy** for AWS: the agent holds proxy-issued fake AWS keys with no IAM identity, and the proxy re-signs outbound requests with real credentials the agent never sees. Isolation is a property of the environment, not the agent — the agent cannot misuse credentials it does not hold.
-
-This uses [mitmproxy](https://mitmproxy.org/) under the hood, with [elhaz](https://github.com/61418/elhaz) as the IAM Identity Center credential source. See the [blog post](./BLOG.md) for the conceptual background on credential injection proxies as a pattern.
-
-## How it works
 
 **Credential carrier** — the proxy generates fake-but-syntactically-valid AWS keypairs and vends them to agent clients over a Unix socket (`creds.sock`). There is no IAM identity behind these keys. Each socket connection gets its own distinct keypair so the proxy can tell clients apart. The agent's AWS SDK uses the keypair to sign requests; if the keypair leaks, it is useless to AWS.
 
@@ -69,21 +77,37 @@ Open two terminal panes. In the first, start the proxy and tail its action strea
 ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up --build proxy
 ```
 
-You'll see mitmproxy start and a line like `Action log: /run/proxy/actions.log`. Keep this pane visible — resolved IAM actions will print here as they're observed.
+You'll see mitmproxy start and log lines as requests come in. Keep this pane visible — resolved IAM actions are logged here and written to `/run/proxy/actions.log` inside the container.
 
-### Step 2 — drop into the agent shell
+### Step 2 — run an integration test (one-liner)
 
-In the second pane, start the agent container and open an interactive shell:
+To verify the stack is working end-to-end, run a command directly in a throwaway agent container:
 
 ```bash
-ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose run --rm agent
+docker compose run --rm agent aws sts get-caller-identity
 ```
 
-The agent container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-configured. The proxy holds the real IAC credentials; the agent never sees them.
+Expected output:
 
-### Step 3 — run AWS commands and watch the policy build
+```json
+{
+    "UserId": "AROAEXAMPLE:boto3-refresh-session",
+    "Account": "123456789012",
+    "Arn": "arn:aws:sts::123456789012:assumed-role/YourRole/boto3-refresh-session"
+}
+```
 
-From inside the agent shell, run any AWS commands:
+If you see this, credentials are flowing: proxy keypair → local SigV4 validation → elhaz re-sign → AWS. A `ServiceUnavailable` response means the proxy can't reach the elhaz daemon (check `elhaz daemon status` and that the session is listed in `elhaz daemon list`).
+
+### Step 3 — drop into an interactive agent shell
+
+For longer sessions, open an interactive shell in the agent container:
+
+```bash
+docker compose run --rm agent bash
+```
+
+The container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-configured. Run any AWS commands and watch the proxy pane:
 
 ```bash
 aws sts get-caller-identity
@@ -158,20 +182,6 @@ host
 ```
 
 The agent is on an internal Docker bridge network. Its only internet egress is through the proxy container.
-
-### Switching to enforcement mode
-
-After running the agent in record mode, build an allowlist from the proxy logs and switch:
-
-```bash
-# Collect the resolved actions from proxy logs (one action per line)
-docker compose logs proxy | grep "Resolved actions" > actions.txt
-
-# Author a policy.json from the observed actions, then:
-PROXY_MODE=enforce ALLOWLIST_PATH=/path/to/policy.json docker compose up -d
-```
-
-The `ALLOWLIST_PATH` file is standard IAM policy JSON — the same format you'd pass to `aws iam put-role-policy`.
 
 > **Note on dependencies:** mitmproxy 12.x and elhaz 0.5.x have an irreconcilable `typing-extensions` version conflict. The proxy image resolves this by installing elhaz in a separate venv (`/opt/elhaz-venv`) and symlinking its binary onto `PATH`. They never share a Python environment.
 

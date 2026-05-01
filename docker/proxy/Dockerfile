@@ -13,6 +13,7 @@ WORKDIR /proxy
 
 COPY elhaz_resign.py .
 COPY proxy/ proxy/
+COPY docs/map.json docs/map.json
 
 ENV PROXY_SOCK_PATH=/run/proxy/creds.sock
 ENV ELHAZ_SOCKET_PATH=/tmp/elhaz.sock

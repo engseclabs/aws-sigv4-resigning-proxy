@@ -8,7 +8,7 @@ services:
       - ${ELHAZ_SOCK:-~/.elhaz/sock/daemon.sock}:/tmp/elhaz.sock:ro
       # elhaz configs from the host — tells the proxy which role to assume
       - ${ELHAZ_CONFIG_DIR:-~/.elhaz/configs}:/root/.elhaz/configs:ro
-      # shared volume: proxy writes creds.sock here, agent reads it
+      # shared volume: proxy writes creds.sock and actions.log here, agent reads them
       - proxy-run:/run/proxy
       # mitmproxy CA cert persisted across restarts so the agent trusts it
       - mitm-ca:/run/mitmproxy
@@ -17,6 +17,7 @@ services:
       # tell elhaz inside the container to reach the host daemon via mounted socket
       ELHAZ_SOCKET_PATH: /tmp/elhaz.sock
       PROXY_SOCK_PATH: /run/proxy/creds.sock
+      ACTION_LOG_PATH: /run/proxy/actions.log
     ports:
       - "8080:8080"
     networks:
@@ -36,7 +37,7 @@ services:
       proxy:
         condition: service_healthy
     volumes:
-      # only creds.sock — no elhaz socket, no IAC credentials
+      # creds.sock and actions.log — no elhaz socket, no IAC credentials
       - proxy-run:/run/proxy:ro
       # CA cert so the agent trusts the proxy's TLS interception
       - mitm-ca:/run/mitmproxy:ro
@@ -46,9 +47,14 @@ services:
       HTTPS_PROXY: http://proxy:8080
       HTTP_PROXY: http://proxy:8080
       PROXY_SOCK_PATH: /run/proxy/creds.sock
+      ACTION_LOG_PATH: /run/proxy/actions.log
     # agent is on the internal network only — proxy has the only internet egress
     networks:
       - proxy-net
+    stdin_open: true
+    tty: true
+    # Drop into bash so `docker compose run agent` lands in an interactive shell.
+    command: ["/bin/bash"]
 
 networks:
   proxy-net:

@@ -24,48 +24,88 @@ The proxy is the workaround: it holds an [elhaz](https://github.com/61418/elhaz)
 
 ### Prerequisites
 
-- Docker and docker compose
-- [elhaz](https://github.com/61418/elhaz) installed, daemon running, and target role added
+- Docker and Docker Compose
+- [elhaz](https://github.com/61418/elhaz) installed, daemon running, and the target role added
 
 ```bash
 elhaz daemon start
-elhaz daemon add -n sandbox-elhaz   # or whatever role you want the agent to use
+elhaz daemon add -n sandbox-elhaz   # or whatever IAC role the agent should use
 ```
 
-### Start the stack
+### Step 1 — start the stack
+
+Open two terminal panes. In the first, start the proxy and tail its action stream:
 
 ```bash
-# Build images and start proxy + agent containers
-ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up -d --build
+ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up --build proxy
 ```
 
-The proxy generates a mitmproxy CA cert on first run and persists it in the `mitm-ca` volume. The agent waits for the proxy TCP healthcheck to pass before starting.
+You'll see mitmproxy start and a line like `Action log: /run/proxy/actions.log`. Keep this pane visible — resolved IAM actions will print here as they're observed.
 
-### Run the test
+### Step 2 — drop into the agent shell
+
+In the second pane, start the agent container and open an interactive shell:
 
 ```bash
-docker compose exec agent bash /agent/test_resign.sh
+ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose run --rm agent
 ```
 
-Expected output:
-```
-=== elhaz SigV4 re-signing — Phase 1 ===
-Mode: container
-...
-SUCCESS: The identity is an assumed-role (as expected from elhaz).
-```
+The agent container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-configured. The proxy holds the real IAC credentials; the agent never sees them.
 
-Or call the AWS CLI directly — the agent container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-set:
+### Step 3 — run AWS commands and watch the policy build
+
+From inside the agent shell, run any AWS commands:
 
 ```bash
-docker compose exec agent aws sts get-caller-identity
-docker compose exec agent aws s3 ls
+aws sts get-caller-identity
+aws s3 ls
+aws iam get-role --role-name MyRole
 ```
+
+In the proxy pane you'll see lines like:
+
+```
+[14:32:01] ALLOWED  sts:GetCallerIdentity
+[14:32:09] ALLOWED  s3:ListAllMyBuckets
+[14:32:15] ALLOWED  iam:GetRole
+```
+
+Each line is a distinct IAM action the agent actually called — not a guess.
+
+### Step 4 — extract the policy
+
+When you're done running commands, generate a least-privilege policy from everything observed so far:
+
+```bash
+get-policy
+```
+
+Output:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ProxyRecordedActions",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "s3:ListAllMyBuckets",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Pipe it to a file, tighten the `Resource` fields, and it's ready to use as an IAM policy or a session policy.
 
 ### Tear down
 
 ```bash
-docker compose down     # stops containers, keeps volumes (CA cert, etc.)
+docker compose down     # stops containers, keeps volumes (CA cert, action log)
 docker compose down -v  # stops containers and removes volumes
 ```
 

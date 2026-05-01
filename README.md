@@ -16,28 +16,9 @@ This uses [mitmproxy](https://mitmproxy.org/) under the hood, with [elhaz](https
 
 There are two things going on inside the proxy: it vends fake credentials to the agent, and it rewrites outbound requests to use real ones. Here they are separately, then together.
 
-### 1. Credential replacement
 
-The agent never sees real AWS credentials. The proxy generates fake-but-syntactically-valid keypairs and hands them out over a Unix socket. The agent's SDK signs requests with these fake keys, exactly as it would with real ones.
 
-```mermaid
-graph LR
-    agent["Agent<br/>(AWS SDK)"]
-    helper["proxy-creds<br/>(credential_process)"]
-    vendor["creds.sock<br/>(keypair vendor)"]
-
-    agent -- "1. needs credentials" --> helper
-    helper -- "2. requests keypair" --> vendor
-    vendor -- "3. fake AKID + secret" --> helper
-    helper -- "4. returns to SDK" --> agent
-
-    style agent fill:#dcfce7,stroke:#22c55e
-    style vendor fill:#dbeafe,stroke:#3b82f6
-```
-
-The fake keypair has no IAM identity behind it. AWS would reject it. It only works because the proxy is going to swap it out before the request leaves.
-
-### 2. Request interception and re-signing
+### 1. Request interception and re-signing
 
 When the agent makes an AWS API call, the request goes through `mitmdump` (HTTPS proxy on port 8080). mitmdump validates the SigV4 signature locally using the secret it issued, then strips that signature and re-signs the request with real credentials fetched from elhaz.
 
@@ -60,6 +41,28 @@ graph LR
 ```
 
 If the inbound signature doesn't validate (unknown access key, mismatched HMAC), mitmdump returns a forged `InvalidClientTokenId` 403 without ever calling elhaz. In enforce mode, it also resolves the request to its IAM action and returns a forged `AccessDenied` 403 if the action isn't on the allowlist.
+
+### 2. Credential replacement
+
+The agent never sees real AWS credentials. The proxy generates fake-but-syntactically-valid keypairs and hands them out over a Unix socket. The agent's SDK signs requests with these fake keys, exactly as it would with real ones.
+
+```mermaid
+graph LR
+    agent["Agent<br/>(AWS SDK)"]
+    helper["proxy-creds<br/>(credential_process)"]
+    vendor["creds.sock<br/>(keypair vendor)"]
+
+    agent -- "1. needs credentials" --> helper
+    helper -- "2. requests keypair" --> vendor
+    vendor -- "3. fake AKID + secret" --> helper
+    helper -- "4. returns to SDK" --> agent
+
+    style agent fill:#dcfce7,stroke:#22c55e
+    style vendor fill:#dbeafe,stroke:#3b82f6
+```
+
+The fake keypair has no IAM identity behind it. AWS would reject it. It only works because the proxy is going to swap it out before the request leaves.
+
 
 ### 3. Putting it together
 

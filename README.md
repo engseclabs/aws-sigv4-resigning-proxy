@@ -40,7 +40,7 @@ graph LR
 
 ## Least privilege guardrails
 
-**Proxy** resolves every outbound AWS request to IAM action and logs them. **Agent** runs a representative workload builds observed **Policy** which is applied by Proxy to lock-in behavior.
+**Proxy** resolves every outbound AWS request to IAM action and logs them. **Agent** runs a representative workload, builds observed **Policy** which is applied by Proxy to lock-in behavior.
 
 ```mermaid
 graph LR
@@ -213,11 +213,3 @@ Override defaults in `.env` or by prefixing `docker compose up`:
 ```bash
 ELHAZ_CONFIG_NAME=my-agent-role docker compose up -d
 ```
-
-## Appendix: why IAM Identity Center roles require a proxy
-
-AWS IAM Identity Center roles live under `/aws-reserved/` and return `UnmodifiableEntity` on any attempt to modify their trust policy. The trust policy allows only `sts:AssumeRoleWithSAML` from the SAML provider — self-assumption is blocked. Session policies (which require an `AssumeRole` call the trust policy must permit) are also unreachable.
-
-The proxy is the workaround: it holds an elhaz session for the IAC role and re-signs outbound requests. The agent authenticates to the proxy, not to AWS directly.
-
-See [DESIGN.md](./DESIGN.md) for the full architecture and design rationale.

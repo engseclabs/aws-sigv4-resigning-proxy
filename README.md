@@ -1,6 +1,8 @@
 # IAM Agent Proxy
 
-> Isolate credentials as a *credential injection proxy* and stop worrying about exfiltration through prompt injection. Then, observe and lockdown IAM permissions with *least privilege guardrails*.
+> Isolate credentials as a *credential injection proxy* and stop worrying about exfiltration through prompt injection.
+
+> Then, observe and lockdown IAM permissions with *least privilege guardrails*.
 
 ![Gears of Total Recall](assets/header.png)
 
@@ -38,7 +40,7 @@ graph LR
 
 ## Least privilege guardrails
 
-The hardest part of locking down an agent's IAM permissions is knowing what it actually needs. Guessing produces overly broad policies; auditing code is error-prone and misses runtime behavior. The proxy resolves every outbound AWS request to its exact IAM action(s) and logs them. Run the agent against a representative workload and you get a precise, observed permission set — not an estimate. Build and apply generated policies to lock-in behavior.
+**Proxy** resolves every outbound AWS request to IAM action and logs them. **Agent** runs a representative workload builds observed **Policy** which is applied by Proxy to lock-in behavior.
 
 ```mermaid
 graph LR

@@ -13,11 +13,11 @@
 graph LR
     
     agent["Agent
-        Signs with fake creds"]
+    Signs with fake creds"]
     proxy["Proxy
-        Validates fake creds and then signs with real creds"]
+    Validates fake creds and then signs with real creds"]
     elhaz["Elhaz
-        Daemon with real creds"]
+    Daemon with real creds"]
     aws["AWS APIs"]
 
     agent -- "Fake SigV4" --> proxy
@@ -43,11 +43,11 @@ The hardest part of locking down an agent's IAM permissions is knowing what it a
 ```mermaid
 graph LR
     agent["Agent
-        Makes AWS API calls"]
+    Makes AWS API calls"]
     proxy["Proxy
-        Records actions and enforces policy"]
+    Records actions and enforces policy"]
     policy["Policy
-        Emulated IAM evaluation"]
+    Emulated IAM evaluation"]
     aws["AWS APIs"]
 
     agent -- "Request" --> proxy

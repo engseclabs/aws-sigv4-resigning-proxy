@@ -1,8 +1,6 @@
 # IAM Agent Proxy
 
-A **credential injection proxy** and **least privilege guardrail** for AWS. 
-
-run  `docker compose up proxy` and `docker compose up agent` to test.
+**A credential injection proxy and least privilege guardrail for AWS.** Agents with powerful AWS IAM credential access are a source of risk. Use IAM Agent Proxy to isolate credentials against exfiltration through prompt injection, and start observing and locking down IAM policies as you go.
 
 
 ## Credential injection proxy

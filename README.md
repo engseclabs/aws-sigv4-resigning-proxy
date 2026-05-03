@@ -1,6 +1,6 @@
-# IAM Agent Proxy is a credential injection proxy and least privilege guardrail for AWS.
+# IAM Agent Proxy
 
-Agents with powerful AWS IAM credential access are a source of risk. Use IAM Agent Proxy to isolate credentials against exfiltration through prompt injection, and start observing and locking down IAM policies as you go.
+Agents with powerful AWS IAM credential access are a source of risk. Use IAM Agent Proxy to isolate credentials as a *credential injection proxy* and stop worrying about exfiltration through prompt injection. Then, start observing and locking down IAM permissions as you go with *least privilege guardrails*.
 
 
 ## Credential injection proxy

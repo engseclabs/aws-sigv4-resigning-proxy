@@ -1,5 +1,7 @@
 # IAM Agent Proxy
 
+![Gears of Total Recall](assets/header.png)
+
 Agents with powerful AWS IAM credential access are a source of risk. Use IAM Agent Proxy to isolate credentials as a *credential injection proxy* and stop worrying about exfiltration through prompt injection. Then, start observing and locking down IAM permissions as you go with *least privilege guardrails*.
 
 
@@ -11,13 +13,13 @@ The sandboxed agent holds proxy-issued fake AWS keys with no IAM identity, and t
 ```mermaid
 graph LR
     
-    agent["**Agent**
+    agent["Agent
         Signs with fake creds"]
-    proxy["**Proxy**
+    proxy["Proxy
         Validates fake creds, signs with real creds"]
-    elhaz["**Elhaz**
+    elhaz["Elhaz
         Daemon with real creds"]
-    aws["**AWS APIs**"]
+    aws["AWS APIs"]
 
     agent -- "Fake SigV4" --> proxy
     proxy -- "Socket IPC" --> elhaz
@@ -41,13 +43,13 @@ The hardest part of locking down an agent's IAM permissions is knowing what it a
 
 ```mermaid
 graph LR
-    agent["**Agent**
+    agent["Agent
         Makes AWS API calls"]
-    proxy["**Proxy**
+    proxy["Proxy
         Records AWS API calls to generate IAM policy"]
-    policy["**Policy**
+    policy["Policy
         Recorded/observed AWS IAM policy"]
-    aws["**AWS APIs**"]
+    aws["AWS APIs"]
 
     agent -- "Request" --> proxy
     proxy -- "Response" --> agent

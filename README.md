@@ -1,13 +1,12 @@
 # IAM Agent Proxy
 
+> Isolate credentials as a *credential injection proxy* and stop worrying about exfiltration through prompt injection. Then, observe and lockdown IAM permissions with *least privilege guardrails*.
+
 ![Gears of Total Recall](assets/header.png)
-
-Agents with powerful AWS IAM credential access are a source of risk. Use IAM Agent Proxy to isolate credentials as a *credential injection proxy* and stop worrying about exfiltration through prompt injection. Then, start observing and locking down IAM permissions as you go with *least privilege guardrails*.
-
 
 ## Credential injection proxy
 
-The sandboxed agent holds proxy-issued fake AWS keys with no IAM identity, and the proxy re-signs outbound requests with real credentials the agent never sees. Isolation is a property of the environment, not the agent — the agent can only exfiltrate proxy credentials.
+**Agent** uses fake AWS keys and the **Proxy** re-signs outbound requests with real ones.
 
 
 ```mermaid
@@ -16,7 +15,7 @@ graph LR
     agent["Agent
         Signs with fake creds"]
     proxy["Proxy
-        Validates fake creds, signs with real creds"]
+        Validates fake creds and then signs with real creds"]
     elhaz["Elhaz
         Daemon with real creds"]
     aws["AWS APIs"]
@@ -37,7 +36,7 @@ graph LR
     class aws awsStyle
 ```
 
-## Least privilege guardrail
+## Least privilege guardrails
 
 The hardest part of locking down an agent's IAM permissions is knowing what it actually needs. Guessing produces overly broad policies; auditing code is error-prone and misses runtime behavior. The proxy resolves every outbound AWS request to its exact IAM action(s) and logs them. Run the agent against a representative workload and you get a precise, observed permission set — not an estimate. Build and apply generated policies to lock-in behavior.
 
@@ -46,9 +45,9 @@ graph LR
     agent["Agent
         Makes AWS API calls"]
     proxy["Proxy
-        Records AWS API calls to generate IAM policy"]
+        Records actions and enforces policy"]
     policy["Policy
-        Recorded/observed AWS IAM policy"]
+        Emulated IAM evaluation"]
     aws["AWS APIs"]
 
     agent -- "Request" --> proxy

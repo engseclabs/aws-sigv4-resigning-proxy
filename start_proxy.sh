@@ -1,26 +1,13 @@
 #!/usr/bin/env bash
-# start_proxy.sh — start mitmdump with the iam_agent_proxy addon on port 8080.
+# start_proxy.sh — start iam-agent-proxy on port 8080.
 #
 # Run this in a separate terminal before running test_resign.sh.
-# The proxy generates ~/.mitmproxy/mitmproxy-ca-cert.pem on first run.
+# The proxy generates ~/.iam-agent-proxy/ca.pem on first run and writes
+# ca_bundle to ~/.aws/config so AWS_CA_BUNDLE doesn't need to be set.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ADDON="${SCRIPT_DIR}/iam_agent_proxy.py"
-
-if [[ ! -f "${ADDON}" ]]; then
-    echo "ERROR: addon not found at ${ADDON}"
-    exit 1
-fi
-
-# Prefer the venv's mitmdump if available
-VENV_MITMDUMP="${SCRIPT_DIR}/venv/bin/mitmdump"
-if [[ -f "${VENV_MITMDUMP}" ]]; then
-    MITMDUMP="${VENV_MITMDUMP}"
-else
-    MITMDUMP="mitmdump"
-fi
 
 SOCK_PATH="${PROXY_SOCK_PATH:-/run/proxy/creds.sock}"
 SOCK_DIR="$(dirname "${SOCK_PATH}")"
@@ -30,18 +17,21 @@ if [[ ! -d "${SOCK_DIR}" ]]; then
     mkdir -p "${SOCK_DIR}"
 fi
 
-echo "Starting mitmproxy with iam_agent_proxy addon..."
-echo "  Addon:       ${ADDON}"
+# Prefer the venv's Python if available
+VENV_PYTHON="${SCRIPT_DIR}/venv/bin/python"
+if [[ -f "${VENV_PYTHON}" ]]; then
+    PYTHON="${VENV_PYTHON}"
+else
+    PYTHON="python3"
+fi
+
+echo "Starting iam-agent-proxy..."
 echo "  Port:        8080"
-echo "  Config:      ${ELHAZ_CONFIG_NAME:-sandbox-elhaz}"
-echo "  CA:          ${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
+echo "  CA:          ${HOME}/.iam-agent-proxy/ca.pem"
 echo "  Creds sock:  ${SOCK_PATH}"
 echo
-echo "First run generates ${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
+echo "First run generates ${HOME}/.iam-agent-proxy/ca.pem"
 echo "Press Ctrl-C to stop."
 echo
 
-exec "${MITMDUMP}" \
-    --listen-port 8080 \
-    --scripts "${ADDON}" \
-    --set confdir="${HOME}/.mitmproxy"
+exec "${PYTHON}" -m iam_agent_proxy

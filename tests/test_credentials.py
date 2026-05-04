@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from proxy.credentials import (
+from core.credentials import (
     CredentialStore,
     _new_access_key_id,
     _prepare_socket_path,
 )
-from proxy.exceptions import ProxyError
-from proxy.models import ClientCred
+from core.exceptions import ProxyError
+from core.models import ClientCred
 
 from conftest import make_client_cred, _short_sock_path
 

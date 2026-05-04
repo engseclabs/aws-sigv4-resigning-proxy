@@ -5,7 +5,7 @@
 # Assumes the environment is already configured:
 #   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE) set to proxy-issued creds
 #   - HTTPS_PROXY pointing at the proxy
-#   - AWS_CA_BUNDLE pointing at the mitmproxy CA cert
+#   - AWS_CA_BUNDLE pointing at ~/.iam-agent-proxy/ca.pem (or set via ~/.aws/config ca_bundle)
 #
 # In Docker:   docker compose exec agent bash /agent/test_resign.sh
 # Locally:     source dev_setup.sh && bash test_resign.sh

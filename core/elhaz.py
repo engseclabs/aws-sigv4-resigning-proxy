@@ -1,4 +1,9 @@
-"""elhaz IAC credential cache — fetches and refreshes credentials via the elhaz CLI."""
+"""elhaz IAC credential cache — fetches and refreshes credentials via the elhaz CLI.
+
+NOTE: This module is used only by the Docker-compose path (docker/proxy/).
+      The native (non-Docker) path uses proxy.upstream_creds.BotoCredentialSource instead.
+      Do not import this module from addon.py or iam_agent_proxy.py.
+"""
 
 __all__ = ["ElhazCredentialCache"]
 

@@ -18,23 +18,17 @@ graph LR
     Signs with fake creds"]
     proxy["Proxy
     Validates fake creds and then signs with real creds"]
-    elhaz["Elhaz
-    Daemon with real creds"]
     aws["AWS APIs"]
 
     agent -- "Fake SigV4" --> proxy
-    proxy -- "Socket IPC" --> elhaz
-    elhaz -- "Real creds" --> proxy
-    proxy -- "Real SigV4" --> aws
+    proxy -- "Real SigV4 (boto3)" --> aws
 
     classDef agentStyle fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef proxyStyle fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    classDef elhazStyle fill:#f5f5f5,stroke:#737373,color:#262626
     classDef awsStyle fill:#fef3c7,stroke:#d97706,color:#78350f
 
     class agent agentStyle
     class proxy proxyStyle
-    class elhaz elhazStyle
     class aws awsStyle
 ```
 
@@ -69,77 +63,52 @@ graph LR
     class aws awsStyle
 ```
 
-## Quickstart
+## Quickstart (native — no Docker)
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- [elhaz](https://github.com/61418/elhaz) installed, daemon running, and the target role added
+- Python 3.12
+- AWS credentials on the host (any standard source: `~/.aws/credentials`, instance profile, environment variables, SSO, etc.)
 
 ```bash
-elhaz daemon start
-elhaz daemon add -n sandbox-elhaz   # or whatever elahz config the agent should use
+bash setup_venv.sh
 ```
 
-### Step 1 — start the stack
+This creates `venv/` and installs `proxy.py`, `boto3`, `botocore`, `cryptography`, and `pydantic` — no other dependencies needed.
 
-Open two terminal panes. In the first, start the proxy and tail its action stream:
+### Step 1 — start the proxy
 
 ```bash
-ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up --build proxy
+bash start_proxy.sh
 ```
 
-You'll see the proxy start and log lines as requests come in. Keep this pane visible — resolved IAM actions are logged here and written to `/run/proxy/actions.log` inside the container.
+On first run the proxy generates `~/.iam-agent-proxy/ca.pem` and writes `ca_bundle = ~/.iam-agent-proxy/ca.pem` into `[default]` in `~/.aws/config`. This means `AWS_CA_BUNDLE` does not need to be set manually. The entry is removed on clean exit (Ctrl-C).
 
-### Step 2 — run an integration test (one-liner)
+### Step 2 — configure your shell
 
-To verify the stack is working end-to-end, run a command directly in a throwaway agent container:
+In a second terminal:
 
 ```bash
-docker compose run --rm agent aws sts get-caller-identity
+source dev_setup.sh
 ```
 
-Expected output:
+This fetches a proxy-issued keypair, sets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `HTTPS_PROXY`, and `HTTP_PROXY`. No `AWS_CA_BUNDLE` needed — the proxy already wrote it to `~/.aws/config`.
 
-```json
-{
-    "UserId": "AROAEXAMPLE:boto3-refresh-session",
-    "Account": "123456789012",
-    "Arn": "arn:aws:sts::123456789012:assumed-role/YourRole/boto3-refresh-session"
-}
-```
-
-If you see this, credentials are flowing: proxy keypair → local SigV4 validation → elhaz re-sign → AWS. A `ServiceUnavailable` response means the proxy can't reach the elhaz daemon (check `elhaz daemon status` and that the session is listed in `elhaz daemon list`).
-
-### Step 3 — drop into an interactive agent shell
-
-For longer sessions, open an interactive shell in the agent container:
-
-```bash
-docker compose run --rm agent bash
-```
-
-The container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-configured. Run any AWS commands and watch the proxy pane:
+### Step 3 — make AWS calls
 
 ```bash
 aws sts get-caller-identity
 aws s3 ls
-aws iam get-role --role-name MyRole
 ```
 
-In the proxy pane you'll see lines like:
+In the proxy terminal you'll see lines like:
 
 ```
 [14:32:01] ALLOWED  sts:GetCallerIdentity
 [14:32:09] ALLOWED  s3:ListAllMyBuckets
-[14:32:15] ALLOWED  iam:GetRole
 ```
 
-Each line is a distinct IAM action the agent actually called — not a guess.
-
 ### Step 4 — extract the policy
-
-When you're done running commands, generate a least-privilege policy from everything observed so far:
 
 ```bash
 get-policy
@@ -155,7 +124,6 @@ Output:
       "Sid": "ProxyRecordedActions",
       "Effect": "Allow",
       "Action": [
-        "iam:GetRole",
         "s3:ListAllMyBuckets",
         "sts:GetCallerIdentity"
       ],
@@ -165,7 +133,57 @@ Output:
 }
 ```
 
-Pipe it to a file, tighten the `Resource` fields, and it's ready to use as an IAM policy or a session policy.
+---
+
+## Quickstart (Docker — with elhaz)
+
+The Docker path uses [elhaz](https://github.com/61418/elhaz) as the upstream credential source instead of boto3. This is useful when the real credentials live in an IAM Identity Center role managed by elhaz.
+
+### Prerequisites
+
+- Docker and Docker Compose
+- [elhaz](https://github.com/61418/elhaz) installed, daemon running, and the target role added
+
+```bash
+elhaz daemon start
+elhaz daemon add -n sandbox-elhaz   # or whatever elhaz config the agent should use
+```
+
+### Start the stack
+
+```bash
+ELHAZ_CONFIG_NAME=sandbox-elhaz docker compose up --build proxy
+```
+
+### Run an integration test
+
+```bash
+docker compose run --rm agent aws sts get-caller-identity
+```
+
+Expected output:
+
+```json
+{
+    "UserId": "AROAEXAMPLE:boto3-refresh-session",
+    "Account": "123456789012",
+    "Arn": "arn:aws:sts::123456789012:assumed-role/YourRole/boto3-refresh-session"
+}
+```
+
+### Drop into an interactive agent shell
+
+```bash
+docker compose run --rm agent bash
+```
+
+The container has `AWS_PROFILE`, `HTTPS_PROXY`, and `AWS_CA_BUNDLE` pre-configured.
+
+### Extract the policy
+
+```bash
+get-policy
+```
 
 ### Tear down
 
@@ -174,17 +192,33 @@ docker compose down     # stops containers, keeps volumes (CA cert, action log)
 docker compose down -v  # stops containers and removes volumes
 ```
 
-## How the containers are wired
+---
+
+## How the native path works
+
+```
+~/.iam-agent-proxy/
+  ca.pem     # CA cert generated on first run; trusted by the system/AWS SDK via ~/.aws/config
+  ca.key     # CA private key
+
+~/.aws/config
+  [default]
+  ca_bundle = ~/.iam-agent-proxy/ca.pem   # written on startup, removed on clean exit
+```
+
+The proxy runs as a single Python process — no separate venvs, no subprocess dependencies. `proxy.py` handles TLS interception using the generated CA; `boto3` supplies real credentials via the standard credential provider chain.
+
+## How the Docker path works
 
 ```
 host
 ├── elhaz daemon  ←─── ~/.elhaz/sock/daemon.sock (bind-mounted into proxy)
 │
 ├── proxy container
-│   ├── mitmdump :8080          — intercepts, validates SigV4, resolves IAM actions, re-signs
+│   ├── proxy.py :8080          — intercepts, validates SigV4, resolves IAM actions, re-signs
 │   ├── elhaz (in /opt/elhaz-venv) — fetches IAC credentials via mounted socket
 │   ├── /run/proxy/creds.sock   — vends per-client proxy keypairs (named volume)
-│   └── /run/mitmproxy/         — CA cert (named volume)
+│   └── /run/proxy/ca/          — CA cert (named volume)
 │
 └── agent container
     ├── AWS SDK / CLI           — signs requests with proxy keypair
@@ -199,17 +233,17 @@ The agent is on an internal Docker bridge network. Its only internet egress is t
 
 | Env var | Default | Description |
 |---|---|---|
-| `ELHAZ_CONFIG_NAME` | `sandbox-elhaz` | elhaz config name for the IAC role |
-| `ELHAZ_SOCK` | `~/.elhaz/sock/daemon.sock` | Host path to the elhaz daemon socket |
-| `ELHAZ_CONFIG_DIR` | `~/.elhaz/configs` | Host path to elhaz config files |
-| `ELHAZ_SOCKET_PATH` | `/tmp/elhaz.sock` | Socket path inside the proxy container |
 | `PROXY_SOCK_PATH` | `/run/proxy/creds.sock` | Unix socket path for credential vending |
 | `PROXY_KEYPAIR_TTL` | `3600` | Proxy keypair lifetime in seconds |
 | `PROXY_MODE` | `record` | `record` (forward all) or `enforce` (check allowlist) |
 | `ALLOWLIST_PATH` | *(required in enforce mode)* | Path to IAM policy JSON allowlist |
+| `ACTION_LOG_PATH` | `/run/proxy/actions.log` | Where resolved actions are written |
 
-Override defaults in `.env` or by prefixing `docker compose up`:
+**Docker-only env vars** (elhaz credential source):
 
-```bash
-ELHAZ_CONFIG_NAME=my-agent-role docker compose up -d
-```
+| Env var | Default | Description |
+|---|---|---|
+| `ELHAZ_CONFIG_NAME` | `sandbox-elhaz` | elhaz config name for the IAC role |
+| `ELHAZ_SOCK` | `~/.elhaz/sock/daemon.sock` | Host path to the elhaz daemon socket |
+| `ELHAZ_CONFIG_DIR` | `~/.elhaz/configs` | Host path to elhaz config files |
+| `ELHAZ_SOCKET_PATH` | `/tmp/elhaz.sock` | Socket path inside the proxy container |

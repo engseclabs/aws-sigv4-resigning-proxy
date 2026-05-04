@@ -8,8 +8,6 @@ import logging
 import re
 from urllib.parse import parse_qs, urlparse
 
-from mitmproxy import http
-
 from .credentials import CredentialStore
 
 log = logging.getLogger(__name__)
@@ -70,13 +68,19 @@ def _parse_auth_header(auth: str) -> dict[str, str] | None:
     return parts if {"Credential", "SignedHeaders", "Signature"} <= parts.keys() else None
 
 
-def validate_sigv4(flow: http.HTTPFlow, store: CredentialStore) -> bool:
+def validate_sigv4(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    store: CredentialStore,
+) -> bool:
     """
     Recompute the SigV4 signature for the inbound request and compare it
     against the Authorization header. Looks up the signing secret by
     access_key_id so each client is validated against its own keypair.
     """
-    auth = flow.request.headers.get("authorization", "")
+    auth = headers.get("authorization") or headers.get("Authorization", "")
     parsed = _parse_auth_header(auth)
     if not parsed:
         log.warning("Missing or malformed Authorization header")
@@ -96,13 +100,14 @@ def validate_sigv4(flow: http.HTTPFlow, store: CredentialStore) -> bool:
     signed_headers = parsed["SignedHeaders"].split(";")
     received_sig = parsed["Signature"]
 
+    # Build a case-insensitive header lookup
+    headers_lower = {k.lower(): v for k, v in headers.items()}
     canonical_headers = "".join(
-        f"{h}:{flow.request.headers.get(h, '').strip()}\n"
+        f"{h}:{headers_lower.get(h, '').strip()}\n"
         for h in signed_headers
     )
-    body = flow.request.content or b""
     body_hash = hashlib.sha256(body).hexdigest()
-    parsed_url = urlparse(flow.request.pretty_url)
+    parsed_url = urlparse(url)
     canonical_uri = parsed_url.path or "/"
     canonical_qs = "&".join(
         sorted(
@@ -112,7 +117,7 @@ def validate_sigv4(flow: http.HTTPFlow, store: CredentialStore) -> bool:
         )
     )
     canonical_request = "\n".join([
-        flow.request.method,
+        method,
         canonical_uri,
         canonical_qs,
         canonical_headers,
@@ -120,7 +125,7 @@ def validate_sigv4(flow: http.HTTPFlow, store: CredentialStore) -> bool:
         body_hash,
     ])
 
-    amz_date = flow.request.headers.get("x-amz-date", "")
+    amz_date = headers_lower.get("x-amz-date", "")
     string_to_sign = "\n".join([
         "AWS4-HMAC-SHA256",
         amz_date,

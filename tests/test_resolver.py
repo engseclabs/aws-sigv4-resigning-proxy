@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from proxy.resolver import ActionResolver, _compile_uri_template
+from core.resolver import ActionResolver, _compile_uri_template
 
 
 # --------------------------------------------------------------------------- #

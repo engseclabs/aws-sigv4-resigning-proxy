@@ -2,7 +2,7 @@
 
 import pytest
 
-from proxy.exceptions import ProxyError, UpstreamError, ValidationError, error_status
+from core.exceptions import ProxyError, UpstreamError, ValidationError, error_status
 
 
 # --------------------------------------------------------------------------- #

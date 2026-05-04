@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from proxy.elhaz import REFRESH_BEFORE_EXPIRY_SECONDS, ElhazCredentialCache
+from core.elhaz import REFRESH_BEFORE_EXPIRY_SECONDS, ElhazCredentialCache
 
 
 # --------------------------------------------------------------------------- #
@@ -85,7 +85,7 @@ def test_refresh_parses_credentials(monkeypatch):
         secret="secret456",
         expiry=expiry,
     )
-    monkeypatch.setattr("proxy.elhaz.subprocess.run", lambda *a, **kw: result)
+    monkeypatch.setattr("core.elhaz.subprocess.run", lambda *a, **kw: result)
 
     cache = ElhazCredentialCache("test-config")
     cache._refresh()
@@ -98,7 +98,7 @@ def test_refresh_parses_credentials(monkeypatch):
 def test_refresh_handles_missing_expiration(monkeypatch):
     result = MagicMock()
     result.stdout = _make_cred_output()  # no Expiration key
-    monkeypatch.setattr("proxy.elhaz.subprocess.run", lambda *a, **kw: result)
+    monkeypatch.setattr("core.elhaz.subprocess.run", lambda *a, **kw: result)
 
     cache = ElhazCredentialCache("test-config")
     cache._refresh()
@@ -108,7 +108,7 @@ def test_refresh_handles_missing_expiration(monkeypatch):
 def test_refresh_propagates_subprocess_error(monkeypatch):
     def _raise(*a, **kw):
         raise subprocess.CalledProcessError(1, "elhaz")
-    monkeypatch.setattr("proxy.elhaz.subprocess.run", _raise)
+    monkeypatch.setattr("core.elhaz.subprocess.run", _raise)
 
     cache = ElhazCredentialCache("test-config")
     with pytest.raises(subprocess.CalledProcessError):
@@ -128,7 +128,7 @@ def test_get_calls_refresh_when_stale(monkeypatch):
         calls.append(a)
         return result
 
-    monkeypatch.setattr("proxy.elhaz.subprocess.run", fake_run)
+    monkeypatch.setattr("core.elhaz.subprocess.run", fake_run)
 
     cache = ElhazCredentialCache("test-config")
     cache.get()
@@ -144,7 +144,7 @@ def test_get_does_not_refresh_when_fresh(monkeypatch):
         calls.append(a)
         return result
 
-    monkeypatch.setattr("proxy.elhaz.subprocess.run", fake_run)
+    monkeypatch.setattr("core.elhaz.subprocess.run", fake_run)
 
     cache = ElhazCredentialCache("test-config")
     cache.get()   # first call — fetches
@@ -161,7 +161,7 @@ def test_get_re_fetches_when_near_expiry(monkeypatch):
         calls.append(a)
         return result
 
-    monkeypatch.setattr("proxy.elhaz.subprocess.run", fake_run)
+    monkeypatch.setattr("core.elhaz.subprocess.run", fake_run)
 
     cache = ElhazCredentialCache("test-config")
     cache.get()  # initial fetch
@@ -175,7 +175,7 @@ def test_get_includes_socket_path_when_env_set(monkeypatch):
     monkeypatch.setenv("ELHAZ_SOCKET_PATH", "/tmp/test.sock")
     # Re-import to pick up env var
     import importlib
-    import proxy.elhaz as elhaz_mod
+    import core.elhaz as elhaz_mod
     importlib.reload(elhaz_mod)
 
     result = MagicMock()

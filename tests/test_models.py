@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from proxy.models import ClientCred, CredentialPayload, ErrorEnvelope
+from core.models import ClientCred, CredentialPayload, ErrorEnvelope
 
 
 # --------------------------------------------------------------------------- #

@@ -4,7 +4,7 @@ import json
 import pytest
 from pathlib import Path
 
-from proxy.allowlist import Allowlist
+from core.allowlist import Allowlist
 
 
 def _make(actions):

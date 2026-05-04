@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup_venv.sh — create a Python 3.12 venv with mitmproxy + botocore.
+# setup_venv.sh — create a Python 3.12 venv with proxy.py + boto3 + cryptography.
 # Run once before start_proxy.sh / test_resign.sh.
 
 set -euo pipefail
@@ -24,7 +24,7 @@ fi
 
 echo "Installing/upgrading dependencies..."
 "${VENV}/bin/pip" install --quiet --upgrade pip
-"${VENV}/bin/pip" install --quiet mitmproxy botocore
+"${VENV}/bin/pip" install --quiet "proxy.py" botocore boto3 cryptography pydantic
 
 echo
 echo "Done. To activate:"

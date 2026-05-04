@@ -10,10 +10,9 @@ from pathlib import Path
 
 import pytest
 from botocore.credentials import Credentials
-from mitmproxy.test import tflow
 
-from proxy.credentials import CredentialStore, _serve_creds
-from proxy.models import ClientCred, CredentialPayload
+from core.credentials import CredentialStore, _serve_creds
+from core.models import ClientCred, CredentialPayload
 
 
 # --------------------------------------------------------------------------- #
@@ -63,11 +62,10 @@ def _signing_key(secret: str, date_str: str, region: str, service: str) -> bytes
     return _hmac_sha256(k, "aws4_request")
 
 
-def make_signed_flow(
+def make_signed_request(
     *,
     method: str = "GET",
     host: str = "s3.amazonaws.com",
-    port: int = 443,
     scheme: str = "https",
     path: str = "/bucket/key",
     body: bytes = b"",
@@ -78,19 +76,10 @@ def make_signed_flow(
     date_str: str = "20240101",
     amz_date: str = "20240101T000000Z",
     extra_headers: dict[str, str] | None = None,
-):
-    """Return a mitmproxy HTTPFlow with a valid SigV4 Authorization header."""
-    from urllib.parse import parse_qs, urlparse
+) -> tuple[str, str, dict[str, str], bytes]:
+    """Return (method, url, headers, body) with a valid SigV4 Authorization header."""
+    from urllib.parse import urlparse
 
-    f = tflow.tflow()
-    f.request.method = method
-    f.request.host = host
-    f.request.port = port
-    f.request.scheme = scheme
-    f.request.path = path
-    f.request.content = body
-
-    # Start with minimal required headers
     headers: dict[str, str] = {"host": host, "x-amz-date": amz_date}
     if extra_headers:
         headers.update(extra_headers)
@@ -127,26 +116,16 @@ def make_signed_flow(
         f"SignedHeaders={';'.join(signed_headers)},"
         f"Signature={sig}"
     )
-
-    # Apply all headers to the flow
-    for k, v in headers.items():
-        f.request.headers[k] = v
-    f.request.headers["authorization"] = auth
-
-    # Remove the default test headers added by tflow.tflow()
-    for h in ["header", "content-length"]:
-        if h in f.request.headers:
-            del f.request.headers[h]
-
-    return f
+    headers["authorization"] = auth
+    return method, url, headers, body
 
 
 # --------------------------------------------------------------------------- #
-# FakeElhaz stub
+# FakeCredentialSource stub
 # --------------------------------------------------------------------------- #
 
-class FakeElhazCache:
-    """Stub for ElhazCredentialCache in addon tests."""
+class FakeCredentialSource:
+    """Stub for BotoCredentialSource in addon tests."""
 
     def __init__(self, creds: Credentials | None = None, *, raises: Exception | None = None):
         self._creds = creds or Credentials("FAKEAKID", "fakesecret", None)

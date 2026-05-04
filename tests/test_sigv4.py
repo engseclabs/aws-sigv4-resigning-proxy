@@ -5,9 +5,10 @@ import hmac
 
 import pytest
 
-from proxy.sigv4 import _parse_auth_header, _signing_key, parse_aws_host, validate_sigv4
+from core.sigv4 import _parse_auth_header, _signing_key, parse_aws_host, validate_sigv4
+from core.credentials import CredentialStore
 
-from conftest import make_signed_flow, make_store_with
+from conftest import make_signed_request, make_store_with
 
 
 # --------------------------------------------------------------------------- #
@@ -85,11 +86,11 @@ def test_parse_auth_header_empty_returns_none():
 
 def test_validate_sigv4_valid_signature():
     store = make_store_with(access_key_id="AKIAPROXYTEST12345678", secret="testsecret")
-    flow = make_signed_flow(
+    method, url, headers, body = make_signed_request(
         access_key_id="AKIAPROXYTEST12345678",
         secret="testsecret",
     )
-    assert validate_sigv4(flow, store) is True
+    assert validate_sigv4(method, url, headers, body, store) is True
 
 
 def test_validate_sigv4_accepts_prev_secret():
@@ -98,12 +99,11 @@ def test_validate_sigv4_accepts_prev_secret():
         secret="newsecret",
         prev_secret="oldsecret",
     )
-    # Sign with the old secret — should still validate
-    flow = make_signed_flow(
+    method, url, headers, body = make_signed_request(
         access_key_id="AKIAPROXYTEST12345678",
         secret="oldsecret",
     )
-    assert validate_sigv4(flow, store) is True
+    assert validate_sigv4(method, url, headers, body, store) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -111,39 +111,32 @@ def test_validate_sigv4_accepts_prev_secret():
 # --------------------------------------------------------------------------- #
 
 def test_validate_sigv4_missing_auth_header_returns_false():
-    from mitmproxy.test import tflow as tf
-    flow = tf.tflow()
-    flow.request.host = "s3.amazonaws.com"
-    flow.request.path = "/bucket/key"
-    from proxy.credentials import CredentialStore
-    assert validate_sigv4(flow, CredentialStore()) is False
+    store = CredentialStore()
+    assert validate_sigv4("GET", "https://s3.amazonaws.com/bucket/key", {}, b"", store) is False
 
 
 def test_validate_sigv4_wrong_secret_returns_false():
     store = make_store_with(access_key_id="AKIAPROXYTEST12345678", secret="correct")
-    flow = make_signed_flow(
+    method, url, headers, body = make_signed_request(
         access_key_id="AKIAPROXYTEST12345678",
         secret="wrong",
     )
-    assert validate_sigv4(flow, store) is False
+    assert validate_sigv4(method, url, headers, body, store) is False
 
 
 def test_validate_sigv4_unknown_key_returns_false():
     store = make_store_with(access_key_id="AKIAPROXYTEST12345678", secret="s")
-    flow = make_signed_flow(
+    method, url, headers, body = make_signed_request(
         access_key_id="AKIADIFFERENTKEY12345",
         secret="s",
     )
-    assert validate_sigv4(flow, store) is False
+    assert validate_sigv4(method, url, headers, body, store) is False
 
 
 def test_validate_sigv4_malformed_credential_field_returns_false():
-    from mitmproxy.test import tflow as tf
-    flow = tf.tflow()
-    flow.request.host = "s3.amazonaws.com"
-    flow.request.headers["authorization"] = (
-        "AWS4-HMAC-SHA256 Credential=BADCRED,SignedHeaders=host,Signature=abc"
-    )
-    flow.request.headers["x-amz-date"] = "20240101T000000Z"
-    from proxy.credentials import CredentialStore
-    assert validate_sigv4(flow, CredentialStore()) is False
+    store = CredentialStore()
+    headers = {
+        "authorization": "AWS4-HMAC-SHA256 Credential=BADCRED,SignedHeaders=host,Signature=abc",
+        "x-amz-date": "20240101T000000Z",
+    }
+    assert validate_sigv4("GET", "https://s3.amazonaws.com/bucket/key", headers, b"", store) is False

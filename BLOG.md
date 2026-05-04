@@ -20,37 +20,33 @@ This is the strip-and-resign pattern. I built an implementation of it, and this 
 ```mermaid
 graph TD
     subgraph host["Host"]
-        elhaz["elhaz daemon\n(~/.elhaz/sock/daemon.sock)"]
+        boto3["boto3 credential chain\n(~/.aws, env vars, instance profile, SSO, …)"]
     end
 
-    subgraph proxy_net["Docker bridge network (isolated)"]
-        subgraph proxy_container["Proxy container"]
-            mitmdump["mitmdump :8080\n(intercepts, validates SigV4,\nresolves IAM actions, re-signs)"]
-            elhaz_venv["elhaz (isolated venv)\n(fetches IAC credentials)"]
-            creds_sock["creds.sock\n(vends per-client proxy keypairs)"]
-            ca_vol["CA volume\n(/run/mitmproxy)"]
-        end
-
-        subgraph agent_container["Agent container"]
-            aws_sdk["AWS SDK / CLI\n(signs with proxy keypair)"]
-            proxy_creds["proxy-creds helper\n(credential_process → creds.sock)"]
-            https_proxy["HTTPS_PROXY=proxy:8080"]
-        end
+    subgraph proxy_process["Proxy process"]
+        proxypy["proxy.py :8080\n(intercepts, validates SigV4,\nresolves IAM actions, re-signs)"]
+        creds_sock["creds.sock\n(vends per-client proxy keypairs)"]
+        ca_cert["~/.iam-agent-proxy/ca.pem\n(CA cert, auto-generated)"]
     end
 
-    elhaz -- "bind-mounted socket" --> elhaz_venv
-    creds_sock -- "named volume\n(creds.sock only)" --> proxy_creds
-    ca_vol -- "named volume\n(CA cert)" --> agent_container
-    aws_sdk -- "HTTPS via proxy" --> mitmdump
-    mitmdump -- "re-signed request" --> Internet["AWS APIs"]
+    subgraph agent["Agent process / container"]
+        aws_sdk["AWS SDK / CLI\n(signs with proxy keypair)"]
+        proxy_creds["proxy-creds helper\n(credential_process → creds.sock)"]
+        https_proxy["HTTPS_PROXY=localhost:8080"]
+    end
+
+    boto3 -- "real credentials" --> proxypy
+    creds_sock --> proxy_creds
+    ca_cert -- "trusted via ~/.aws/config ca_bundle" --> agent
+    aws_sdk -- "HTTPS via proxy" --> proxypy
+    proxypy -- "re-signed request" --> Internet["AWS APIs"]
 
     style host fill:#f5f5f5,stroke:#999
-    style proxy_container fill:#dbeafe,stroke:#3b82f6
-    style agent_container fill:#dcfce7,stroke:#22c55e
-    style proxy_net fill:#fefce8,stroke:#eab308
+    style proxy_process fill:#dbeafe,stroke:#3b82f6
+    style agent fill:#dcfce7,stroke:#22c55e
 ```
 
-The proxy container runs [mitmproxy](https://mitmproxy.org/) alongside a credential server. The agent container has `HTTPS_PROXY` pointed at the proxy, trusts the proxy's CA cert, and has no other path to AWS.
+The proxy runs as a single Python process. [proxy.py](https://github.com/abhinavsingh/proxy.py) handles TLS interception using a CA cert it generates on first run. boto3 supplies real credentials via the standard credential provider chain — whatever is configured on the host works. There is no separate credential daemon, no subprocess, and no venv isolation required.
 
 The agent never sees the real IAM credentials. It holds proxy-issued fake keypairs — syntactically valid, no IAM identity behind them. If they show up in a prompt, a log, or an exfiltrated file, they're useless: AWS rejects them immediately. The proxy is the only entity that can do anything meaningful with them.
 
@@ -60,25 +56,25 @@ The immediate motivation was an IAM Identity Center constraint. IAC roles live u
 
 The usual pattern for giving an agent scoped access to an IAM role (assume the role with an inline session policy, hand the resulting credentials to the agent) doesn't work here. The role is locked down by AWS and you can't change that.
 
-The proxy is the workaround. It holds an [elhaz](https://github.com/61418/elhaz) session for the IAC role — elhaz is a local daemon that manages short-lived IAC credentials over a Unix socket — and re-signs the agent's outbound requests with those credentials. The agent authenticates to the proxy; the proxy authenticates to AWS. The agent never touches the IAC credentials.
+The proxy is the workaround. The host machine already has IAC credentials (via IAM Identity Center SSO, an instance profile, or a credential file). The proxy re-signs the agent's outbound requests with those credentials. The agent authenticates to the proxy; the proxy authenticates to AWS. The agent never touches the real credentials.
 
 ## The strip-and-resign flow
 
 Here's what happens when the agent makes an AWS API call:
 
-1. The agent's AWS SDK needs credentials to sign the request. It calls `proxy-creds`, a small helper wired up via `credential_process`. `proxy-creds` connects to `creds.sock` on a shared Docker volume and retrieves the current proxy keypair.
+1. The agent's AWS SDK needs credentials to sign the request. It calls `proxy-creds`, a small helper wired up via `credential_process`. `proxy-creds` connects to `creds.sock` and retrieves the current proxy keypair.
 
 2. The SDK signs the request with the proxy keypair and sends it to `HTTPS_PROXY`.
 
-3. mitmproxy terminates TLS using its CA cert (which the agent trusts) and hands the plaintext request to the addon.
+3. proxy.py terminates TLS using its CA cert (which the AWS SDK trusts via `ca_bundle` in `~/.aws/config`) and hands the plaintext request to the plugin.
 
-4. The addon validates the SigV4 signature locally — HMAC-SHA256 against the held secret — without calling AWS. Requests signed with unknown or mismatched keys are rejected with a forged `InvalidClientTokenId` 403 before any real credential fetch happens.
+4. The plugin validates the SigV4 signature locally — HMAC-SHA256 against the held secret — without calling AWS. Requests signed with unknown or mismatched keys are rejected with a forged `InvalidClientTokenId` 403 before any real credential fetch happens.
 
-5. On success, the addon strips all SigV4 headers (`Authorization`, `X-Amz-Date`, `X-Amz-Security-Token`, `X-Amz-Content-Sha256`), fetches fresh IAC credentials from elhaz, and recomputes the signature.
+5. On success, the plugin strips all SigV4 headers (`Authorization`, `X-Amz-Date`, `X-Amz-Security-Token`, `X-Amz-Content-Sha256`), fetches fresh credentials via `boto3.Session().get_credentials()`, and recomputes the signature.
 
 6. The re-signed request goes to the AWS endpoint.
 
-The local validation step matters. Without it, anything with access to `creds.sock` could submit arbitrary requests and the proxy would re-sign them with real credentials. The SigV4 check ties each request to a specific client identity before any IAC credential is used.
+The local validation step matters. Without it, anything with access to `creds.sock` could submit arbitrary requests and the proxy would re-sign them with real credentials. The SigV4 check ties each request to a specific client identity before any real credential is used.
 
 ## What you get beyond credential isolation
 
@@ -90,7 +86,7 @@ The proxy operates in two modes. In recording mode, all validated requests are f
 
 The workflow is: run in recording mode, review the log, edit out anything unexpected, switch to enforcement mode. The allowlist reflects actual usage. The enforcement boundary catches deviation from that baseline — whether from legitimate new behavior, a changed prompt, or a prompt injection attempt.
 
-**The agent can't expand its own permissions.** An agent that holds long-lived role credentials can call `AssumeRole` itself, attach whatever session policy it wants, and broaden its access. An agent talking through this proxy can't: it has no signing material and never sees the IAC credentials. The proxy is what controls what reaches AWS.
+**The agent can't expand its own permissions.** An agent that holds long-lived role credentials can call `AssumeRole` itself, attach whatever session policy it wants, and broaden its access. An agent talking through this proxy can't: it has no signing material and never sees the real credentials. The proxy is what controls what reaches AWS.
 
 **Proxy denials show up where CloudTrail doesn't.** CloudTrail records what AWS authorized. The proxy records what the agent attempted, including calls that the proxy blocked before they reached AWS. That gap matters when you're trying to baseline agent behavior or investigate a prompt injection that asked for something it shouldn't have.
 
@@ -112,6 +108,6 @@ Enforcement mode is the newest piece and still evolving. The recording-to-enforc
 
 ## Try it
 
-The implementation is at [github.com/engseclabs/aws-sigv4-resigning-proxy](https://github.com/engseclabs/aws-sigv4-resigning-proxy). The README covers setup and configuration. DESIGN.md has the full architecture rationale, including the credential carrier pattern, Docker isolation as an enforcement boundary, and the behavioral least-privilege model in detail.
+The implementation is at [github.com/engseclabs/aws-sigv4-resigning-proxy](https://github.com/engseclabs/aws-sigv4-resigning-proxy). Install with `pip install proxy.py botocore boto3 cryptography pydantic` — no dependency conflicts, no separate venvs. The README covers setup and configuration. DESIGN.md has the full architecture rationale, including the credential carrier pattern, Docker isolation as an enforcement boundary, and the behavioral least-privilege model in detail.
 
 If you're building something in this space or hit a case this doesn't cover, [reach out](https://engseclabs.com/).

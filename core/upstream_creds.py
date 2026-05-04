@@ -2,18 +2,12 @@
 
 __all__ = ["BotoCredentialSource"]
 
-import os
-
 import boto3
 from botocore.credentials import Credentials
 
-# Profile name to use for re-signing. Defaults to "iam-agent-proxy" so the
-# proxy never silently consumes [default] credentials.
-_PROFILE_NAME = os.environ.get("AWS_PROXY_PROFILE", "iam-agent-proxy")
-
 
 class BotoCredentialSource:
-    """Fetches real AWS credentials from a named AWS profile.
+    """Fetches real AWS credentials via boto3's default credential chain.
 
     Holds a single boto3.Session for the lifetime of the proxy so that
     botocore's RefreshableCredentials machinery can refresh expiring credentials
@@ -21,8 +15,8 @@ class BotoCredentialSource:
     discovery from scratch on every request.
     """
 
-    def __init__(self, profile_name: str = _PROFILE_NAME) -> None:
-        self._session = boto3.Session(profile_name=profile_name)
+    def __init__(self) -> None:
+        self._session = boto3.Session()
 
     def get(self) -> Credentials:
         creds = self._session.get_credentials().get_frozen_credentials()

@@ -19,7 +19,9 @@ import socket
 import sys
 from pathlib import Path
 
-SOCK_PATH = Path(os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock"))
+SOCK_PATH = Path(
+    os.environ.get("PROXY_SOCK_PATH", str(Path.home() / ".iam-agent-proxy" / "creds.sock"))
+)
 _TIMEOUT = 10.0  # seconds
 
 

@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """Read the proxy action log and emit a least-privilege IAM policy JSON.
 
-Usage (inside agent container):
-    get-policy                  # print to stdout
-    get-policy > policy.json    # save to file
+Run this in any terminal after the proxy has recorded some AWS calls:
+
+    python get-policy              # print to stdout
+    python get-policy > policy.json
+
+The action log is written to ~/.iam-agent-proxy/actions.log by default.
+Override with ACTION_LOG_PATH if you changed the proxy's default.
 """
 import json
 import os
 import sys
 from pathlib import Path
 
-ACTION_LOG = Path(os.environ.get("ACTION_LOG_PATH", "/run/proxy/actions.log"))
+ACTION_LOG = Path(
+    os.environ.get("ACTION_LOG_PATH", str(Path.home() / ".iam-agent-proxy" / "actions.log"))
+)
 
 if not ACTION_LOG.exists():
-    print(f"No action log found at {ACTION_LOG}. Run some AWS commands first.", file=sys.stderr)
+    print(
+        f"No action log found at {ACTION_LOG}\n"
+        "Make sure the proxy is running and you have made some AWS calls.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 actions = sorted({line.strip() for line in ACTION_LOG.read_text().splitlines() if line.strip()})

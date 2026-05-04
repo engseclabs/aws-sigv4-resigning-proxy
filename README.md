@@ -68,64 +68,48 @@ graph LR
 ### Prerequisites
 
 - Python 3.12
-- An AWS profile named `iam-agent-proxy` in `~/.aws/config` (or override with `AWS_PROXY_PROFILE`)
+- AWS credentials configured for whatever role you want the proxy to re-sign with (any source: SSO, `credential_process`, static keys, instance profile)
 
-```ini
-# ~/.aws/config
-[profile iam-agent-proxy]
-sso_start_url = https://your-org.awsapps.com/start
-sso_region = us-east-1
-sso_account_id = 123456789012
-sso_role_name = YourRole
-```
-
-Any credential source works (SSO, `credential_process`, static keys, instance profile). The proxy holds a single session for its lifetime so that botocore can refresh expiring credentials without re-running provider discovery.
+### Install
 
 ```bash
-bash setup_venv.sh
+pip install -r requirements.txt
 ```
-
-This creates `venv/` and installs `proxy.py`, `boto3`, `botocore`, `cryptography`, and `pydantic` — no other dependencies needed.
 
 ### Step 1 — start the proxy
 
 ```bash
-bash start_proxy.sh
+python iam_agent_proxy.py
 ```
 
-On first run the proxy generates `~/.iam-agent-proxy/ca.pem` and writes `ca_bundle = ~/.iam-agent-proxy/ca.pem` into `[default]` in `~/.aws/config`. This means `AWS_CA_BUNDLE` does not need to be set manually. The entry is removed on clean exit (Ctrl-C).
+On first run the proxy generates `~/.iam-agent-proxy/ca.pem` and writes an `[profile iam-agent-proxy]` section into `~/.aws/config` with `credential_process` pointing at `proxy-creds`. It removes the section on clean exit (Ctrl-C).
 
-### Step 2 — configure your shell
+### Step 2 — make AWS calls
 
 In a second terminal:
 
 ```bash
-source dev_setup.sh
-```
+export AWS_PROFILE=iam-agent-proxy
+export HTTPS_PROXY=http://localhost:8080
 
-This fetches a proxy-issued keypair and sets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `HTTPS_PROXY`, and `HTTP_PROXY`.
-
-### Step 3 — make AWS calls
-
-```bash
 aws sts get-caller-identity
 aws s3 ls
 ```
 
-In the proxy terminal you'll see lines like:
+In the proxy terminal you'll see:
 
 ```
 [14:32:01] ALLOWED  sts:GetCallerIdentity
 [14:32:09] ALLOWED  s3:ListAllMyBuckets
 ```
 
-### Step 4 — extract the policy
+### Step 3 — extract the observed policy
 
 ```bash
-get-policy
+python get-policy
 ```
 
-Output:
+Actions are recorded to `~/.iam-agent-proxy/actions.log` while the proxy is running. `get-policy` reads that file and emits an IAM policy JSON:
 
 ```json
 {
@@ -148,26 +132,28 @@ Output:
 
 ```
 ~/.iam-agent-proxy/
-  ca.pem     # CA cert generated on first run; trusted by the AWS SDK via ~/.aws/config
-  ca.key     # CA private key
+  ca.pem        # CA cert generated on first run; trusted by the AWS SDK via [profile iam-agent-proxy]
+  ca.key        # CA private key
+  creds.sock    # Unix socket that vends proxy keypairs to proxy-creds
+  actions.log   # IAM actions observed by the proxy
 
 ~/.aws/config
-  [default]
-  ca_bundle = ~/.iam-agent-proxy/ca.pem   # written on startup, removed on clean exit
+  [profile iam-agent-proxy]
+  credential_process = python /path/to/proxy-creds   # written on startup, removed on clean exit
+  ca_bundle = ~/.iam-agent-proxy/ca.pem
 ```
 
-The proxy runs as a single Python process — no separate venvs, no subprocess dependencies. `proxy.py` handles TLS interception using the generated CA; `boto3` supplies real credentials via the standard credential provider chain.
+The proxy uses the boto3 default credential chain to obtain real AWS credentials for re-signing. It holds a single session for its lifetime so that botocore can refresh expiring credentials (SSO, instance profiles, assumed roles) without re-running provider discovery.
 
 ## Configuration
 
 | Env var | Default | Description |
 |---|---|---|
-| `AWS_PROXY_PROFILE` | `iam-agent-proxy` | AWS profile used to fetch real credentials for re-signing |
-| `PROXY_SOCK_PATH` | `/run/proxy/creds.sock` | Unix socket path for credential vending |
+| `PROXY_SOCK_PATH` | `~/.iam-agent-proxy/creds.sock` | Unix socket path for credential vending |
 | `PROXY_KEYPAIR_TTL` | `3600` | Proxy keypair lifetime in seconds |
 | `PROXY_MODE` | `record` | `record` (forward all) or `enforce` (check allowlist) |
 | `ALLOWLIST_PATH` | *(required in enforce mode)* | Path to IAM policy JSON allowlist |
-| `ACTION_LOG_PATH` | `/run/proxy/actions.log` | Where resolved actions are written |
+| `ACTION_LOG_PATH` | `~/.iam-agent-proxy/actions.log` | Where resolved actions are written |
 
 ## Integration tests (Docker + elhaz)
 

@@ -21,11 +21,11 @@ def _mock_session(access_key: str = "AKIAFAKE", secret: str = "fakesecret", toke
     return session
 
 
-def _make_src(session=None, profile_name="iam-agent-proxy"):
+def _make_src(session=None):
     """Build a BotoCredentialSource with a mocked boto3.Session."""
     mock = session or _mock_session()
-    with patch("core.upstream_creds.boto3.Session", return_value=mock) as _:
-        src = BotoCredentialSource(profile_name=profile_name)
+    with patch("core.upstream_creds.boto3.Session", return_value=mock):
+        src = BotoCredentialSource()
     src._session = mock  # keep mock accessible after patch exits
     return src, mock
 
@@ -64,16 +64,11 @@ def test_session_reused_across_calls():
     assert mock.get_credentials.call_count == 3  # called each time, but same session object
 
 
-def test_uses_iam_agent_proxy_profile_by_default():
+def test_uses_default_credential_chain():
+    """BotoCredentialSource must not hard-code any profile name."""
     with patch("core.upstream_creds.boto3.Session", return_value=_mock_session()) as mock_cls:
         BotoCredentialSource()
-    mock_cls.assert_called_once_with(profile_name="iam-agent-proxy")
-
-
-def test_accepts_custom_profile_name():
-    with patch("core.upstream_creds.boto3.Session", return_value=_mock_session()) as mock_cls:
-        BotoCredentialSource(profile_name="my-custom-profile")
-    mock_cls.assert_called_once_with(profile_name="my-custom-profile")
+    mock_cls.assert_called_once_with()
 
 
 def test_get_calls_get_frozen_credentials():

@@ -28,7 +28,9 @@ PROXY_SOCK_PATH = Path(os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock"
 
 _PROXY_MODE = os.environ.get("PROXY_MODE", "record").lower()
 _ALLOWLIST_PATH = os.environ.get("ALLOWLIST_PATH", "")
-_ACTION_LOG_PATH = Path(os.environ.get("ACTION_LOG_PATH", "/run/proxy/actions.log"))
+_ACTION_LOG_PATH = Path(
+    os.environ.get("ACTION_LOG_PATH", str(Path.home() / ".iam-agent-proxy" / "actions.log"))
+)
 
 _log_lock = threading.Lock()
 

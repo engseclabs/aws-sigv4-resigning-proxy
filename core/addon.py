@@ -15,7 +15,7 @@ from proxy.http.parser import HttpParser
 from proxy.http.proxy.plugin import HttpProxyBasePlugin
 
 from .allowlist import Allowlist
-from .credentials import CredentialStore, start_creds_server
+from .credentials import CredentialStore, fetch_store_from_socket, start_creds_server
 from .exceptions import EnforcementError, ProxyError, UpstreamError, ValidationError, error_status
 from .models import ErrorEnvelope
 from .resolver import load_resolver
@@ -86,11 +86,13 @@ def _ensure_initialized() -> None:
     with _init_lock:
         if _store is not None:
             return
-        _store = CredentialStore()
+        # Worker processes can't share memory with the parent, so fetch the
+        # keypair from the creds socket the parent started — same socket that
+        # proxy-creds uses. Never generate a new keypair in a worker.
+        _store = fetch_store_from_socket(PROXY_SOCK_PATH)
         _upstream_creds = BotoCredentialSource()
         _allowlist = _load_allowlist()
         _resolver = load_resolver()
-        start_creds_server(PROXY_SOCK_PATH, _store)
         log.info("Proxy mode: %s", _PROXY_MODE)
         log.info("Action log: %s", _ACTION_LOG_PATH)
 

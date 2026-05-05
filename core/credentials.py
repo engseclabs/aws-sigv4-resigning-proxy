@@ -119,3 +119,29 @@ def _serve_creds(sock_path: Path, store: CredentialStore) -> None:
 def start_creds_server(sock_path: Path, store: CredentialStore) -> None:
     t = threading.Thread(target=_serve_creds, args=(sock_path, store), daemon=True)
     t.start()
+
+
+def fetch_store_from_socket(sock_path: Path) -> CredentialStore:
+    """Fetch the keypair from the parent's creds socket and return a read-only store.
+
+    Used by worker processes that can't share memory with the parent — they
+    connect once, get the keypair, and wrap it in a CredentialStore so the
+    rest of the validation logic stays unchanged.
+    """
+    import json
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(5.0)
+        s.connect(str(sock_path))
+        data = b""
+        while chunk := s.recv(4096):
+            data += chunk
+    payload = json.loads(data)
+    store = CredentialStore.__new__(CredentialStore)
+    store._lock = threading.Lock()
+    store._cred = ClientCred(
+        access_key_id=payload["AccessKeyId"],
+        secret_access_key=payload["SecretAccessKey"],
+        expiry=datetime.fromisoformat(payload["Expiration"]),
+    )
+    log.debug("Worker fetched keypair access_key_id=%s from socket", store._cred.access_key_id)
+    return store

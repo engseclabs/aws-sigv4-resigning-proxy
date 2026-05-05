@@ -24,7 +24,9 @@ from .upstream_creds import BotoCredentialSource
 
 log = logging.getLogger(__name__)
 
-PROXY_SOCK_PATH = Path(os.environ.get("PROXY_SOCK_PATH", "/run/proxy/creds.sock"))
+PROXY_SOCK_PATH = Path(
+    os.environ.get("PROXY_SOCK_PATH", str(Path.home() / ".iam-agent-proxy" / "creds.sock"))
+)
 
 _PROXY_MODE = os.environ.get("PROXY_MODE", "record").lower()
 _ALLOWLIST_PATH = os.environ.get("ALLOWLIST_PATH", "")
@@ -122,6 +124,10 @@ class ResignPlugin(HttpProxyBasePlugin):
     """proxy.py plugin that validates and re-signs AWS SigV4 requests."""
 
     def handle_client_request(self, request: HttpParser) -> HttpParser | None:
+        # CONNECT is the TLS tunnel setup — not an AWS API call, skip it.
+        if (request.method or b"").upper() == b"CONNECT":
+            return request
+
         _ensure_initialized()
 
         host_bytes = request.host or b""

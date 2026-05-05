@@ -141,6 +141,9 @@ def _cmd_start() -> None:
         import core.addon as _addon
         _addon._store = _store
 
+        import ssl
+        system_ca_bundle = ssl.get_default_verify_paths().cafile or "/etc/ssl/cert.pem"
+
         sys.argv = [
             "proxy",
             "--hostname", "127.0.0.1",
@@ -148,6 +151,7 @@ def _cmd_start() -> None:
             "--ca-cert-file", str(_CA_CERT),
             "--ca-key-file", str(_CA_KEY),
             "--ca-signing-key-file", str(_CA_KEY),
+            "--ca-file", system_ca_bundle,
             "--plugins", "core.addon.ResignPlugin",
         ]
         from proxy.proxy import main as proxy_main

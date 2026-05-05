@@ -80,8 +80,9 @@ def _write_aws_profile() -> None:
     if not cfg.has_section(section):
         cfg.add_section(section)
 
-    # proxy-creds is installed on PATH by pip — no path juggling needed
-    cfg.set(section, "credential_process", "proxy-creds")
+    # Use the absolute path to proxy-creds so ~/.aws/config works outside the venv
+    proxy_creds_bin = Path(sys.executable).parent / "proxy-creds"
+    cfg.set(section, "credential_process", str(proxy_creds_bin))
     cfg.set(section, "ca_bundle", str(_CA_CERT))
 
     with open(_AWS_CONFIG, "w") as f:

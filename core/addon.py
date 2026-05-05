@@ -192,7 +192,8 @@ class ResignPlugin(HttpProxyBasePlugin):
         try:
             creds = _upstream_creds.get()
         except Exception as exc:
-            raise UpstreamError("Proxy could not obtain IAC credentials.") from exc
+            log.error("Could not obtain upstream credentials: %s", exc)
+            raise UpstreamError(str(exc)) from exc
 
         # Strip inbound auth headers before signing so they don't pollute
         # the canonical request that botocore builds.

@@ -2,6 +2,8 @@
 
 __all__ = ["BotoCredentialSource"]
 
+import os
+
 import boto3
 from botocore.credentials import Credentials
 
@@ -19,5 +21,13 @@ class BotoCredentialSource:
         self._session = boto3.Session()
 
     def get(self) -> Credentials:
-        creds = self._session.get_credentials().get_frozen_credentials()
+        raw = self._session.get_credentials()
+        if raw is None:
+            profile = os.environ.get("AWS_PROFILE", "<none>")
+            raise RuntimeError(
+                f"boto3 found no credentials (AWS_PROFILE={profile}). "
+                "Start the proxy with a real profile: "
+                "AWS_PROFILE=your-profile iam-agent-proxy"
+            )
+        creds = raw.get_frozen_credentials()
         return Credentials(creds.access_key, creds.secret_key, creds.token)

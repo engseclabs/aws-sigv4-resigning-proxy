@@ -77,8 +77,10 @@ pip install -e .
 ### Step 1 — start the proxy
 
 ```bash
-iam-agent-proxy
+AWS_PROFILE=my-real-profile iam-agent-proxy
 ```
+
+`AWS_PROFILE` tells the proxy which real AWS credentials to use when re-signing requests. Set it to any profile with the permissions your agent needs (SSO, assumed role, static keys, etc.). Without it the proxy has no credentials and returns a 503 on every request.
 
 On first run the proxy generates `~/.iam-agent-proxy/ca.pem` and writes an `[profile iam-agent-proxy]` section into `~/.aws/config` with `credential_process = proxy-creds`. It removes the section on clean exit (Ctrl-C).
 
@@ -147,6 +149,7 @@ The proxy uses the boto3 default credential chain to obtain real AWS credentials
 
 | Env var | Default | Description |
 |---|---|---|
+| `AWS_PROFILE` | boto3 default chain | AWS profile the proxy uses to re-sign requests (set when starting the proxy, not in the agent terminal) |
 | `PROXY_SOCK_PATH` | `~/.iam-agent-proxy/creds.sock` | Unix socket path for credential vending |
 | `PROXY_KEYPAIR_TTL` | `3600` | Proxy keypair lifetime in seconds |
 | `PROXY_MODE` | `record` | `record` (forward all) or `enforce` (check allowlist) |

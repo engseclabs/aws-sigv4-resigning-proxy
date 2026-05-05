@@ -131,6 +131,13 @@ def _cmd_start() -> None:
     try:
         os.environ.setdefault("PROXY_SOCK_PATH", str(_SOCK_PATH))
 
+        # Start the creds server in the parent process so the socket exists
+        # before proxy.py forks workers and before proxy-creds is called.
+        # Workers that also call _ensure_initialized will find the socket live
+        # and skip binding (see _prepare_socket_path).
+        from core.credentials import CredentialStore, start_creds_server
+        start_creds_server(_SOCK_PATH, CredentialStore())
+
         import ssl
         system_ca_bundle = ssl.get_default_verify_paths().cafile or "/etc/ssl/cert.pem"
 
